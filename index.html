@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Online Mafia (Werewolf) — A browser-based multiplayer party game using WebRTC. No downloads, no accounts, just share a link and play.">
+  <meta name="theme-color" content="#07071a">
+  <meta name="color-scheme" content="dark">
+  <title>Mafia — Online Party Game</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎭</text></svg>">
+
+  <!-- Styles -->
+  <link rel="stylesheet" href="css/style.css">
+
+  <!-- PeerJS v1.5.5 via CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.5/dist/peerjs.min.js"></script>
+</head>
+<body>
+  <!-- Toast Container -->
+  <div id="toast-container" class="toast-container"></div>
+
+  <div class="app">
+
+    <!-- ============================================================
+         SCREEN: HOME — Create or Join a game
+         ============================================================ -->
+    <section id="screen-home" class="screen active">
+      <!-- Branding -->
+      <div class="brand">
+        <span class="brand__icon">🎭</span>
+        <h1 class="brand__title">Mafia</h1>
+        <p class="brand__subtitle">Online Werewolf Party Game</p>
+      </div>
+
+      <!-- Create Game -->
+      <div class="card">
+        <h2 class="card__title">
+          <span class="icon">🏠</span>
+          Host a Game
+        </h2>
+        <p style="color: var(--color-text-secondary); font-size: var(--font-size-sm); margin-bottom: var(--space-lg);">
+          Create a room and share the code with your team. You'll be the game master.
+        </p>
+        <button id="btn-create" class="btn btn--primary btn--full">
+          ✨ Create Game
+        </button>
+      </div>
+
+      <!-- Divider -->
+      <div class="divider">or</div>
+
+      <!-- Join Game -->
+      <div class="card">
+        <h2 class="card__title">
+          <span class="icon">🎮</span>
+          Join a Game
+        </h2>
+        <div class="input-group" style="margin-bottom: var(--space-md);">
+          <label for="join-room-code">Room Code</label>
+          <input
+            type="text"
+            id="join-room-code"
+            class="input"
+            placeholder="e.g. ABC123"
+            maxlength="6"
+            autocomplete="off"
+            autocapitalize="characters"
+            spellcheck="false"
+          >
+        </div>
+        <div class="input-group" style="margin-bottom: var(--space-lg);">
+          <label for="join-name">Your Name</label>
+          <input
+            type="text"
+            id="join-name"
+            class="input"
+            placeholder="e.g. Alex"
+            maxlength="20"
+            autocomplete="off"
+          >
+        </div>
+        <button id="btn-join" class="btn btn--primary btn--full">
+          🚀 Join Game
+        </button>
+      </div>
+    </section>
+
+    <!-- ============================================================
+         SCREEN: HOST — Room management & test messaging
+         ============================================================ -->
+    <section id="screen-host" class="screen">
+      <!-- Header -->
+      <div style="display: flex; align-items: center; justify-content: space-between;">
+        <div>
+          <h2 style="font-size: var(--font-size-xl); font-weight: 700;">🏠 Game Room</h2>
+          <p class="help-text">You are the host</p>
+        </div>
+        <span id="host-status" class="status-badge status-badge--connecting">
+          <span class="status-badge__dot"></span>
+          Connecting…
+        </span>
+      </div>
+
+      <!-- Room Code -->
+      <div class="card card--sm">
+        <div class="section-header">Room Code</div>
+        <div class="room-code-display">
+          <span id="host-room-code" class="room-code-display__code">------</span>
+          <span id="host-copy-code" class="room-code-display__copy" title="Copy code" role="button" tabindex="0">📋</span>
+        </div>
+        <div class="shareable-link mt-sm">
+          <span class="shareable-link__url" id="host-share-link">—</span>
+          <span id="host-copy-link" class="shareable-link__copy" title="Copy link" role="button" tabindex="0">🔗</span>
+        </div>
+      </div>
+
+      <!-- Player List -->
+      <div class="card card--sm">
+        <div class="card__title">
+          <span class="icon">👥</span>
+          Players
+          <span style="margin-left: auto; font-size: var(--font-size-sm); color: var(--color-text-muted);">
+            (<span id="host-player-count">0</span>)
+          </span>
+        </div>
+        <ul id="host-player-list" class="player-list">
+          <li class="player-list__empty">
+            Waiting for players to join…
+          </li>
+        </ul>
+      </div>
+
+      <!-- Game Settings -->
+      <div class="card card--sm" id="host-settings-card">
+        <div class="card__title">
+          <span class="icon">⚙️</span>
+          Game Settings
+        </div>
+
+        <!-- Mafia Count -->
+        <div class="setting-row">
+          <div class="setting-row__info">
+            <span class="setting-row__label">🔪 Mafia Count</span>
+            <span class="setting-row__desc">How many mafia members</span>
+          </div>
+          <div class="stepper">
+            <button type="button" class="stepper__btn" id="mafia-dec" aria-label="Decrease mafia count">−</button>
+            <span class="stepper__value" id="mafia-count-display">1</span>
+            <button type="button" class="stepper__btn" id="mafia-inc" aria-label="Increase mafia count">+</button>
+          </div>
+        </div>
+
+        <!-- Doctor Toggle -->
+        <div class="setting-row">
+          <div class="setting-row__info">
+            <span class="setting-row__label">🩺 Doctor</span>
+            <span class="setting-row__desc">Protects one player each night</span>
+          </div>
+          <label class="toggle" for="toggle-doctor">
+            <input type="checkbox" id="toggle-doctor" checked>
+            <span class="toggle__slider"></span>
+          </label>
+        </div>
+
+        <!-- Investigator Toggle -->
+        <div class="setting-row">
+          <div class="setting-row__info">
+            <span class="setting-row__label">🔍 Investigator</span>
+            <span class="setting-row__desc">Checks one player's alignment each night</span>
+          </div>
+          <label class="toggle" for="toggle-investigator">
+            <input type="checkbox" id="toggle-investigator" checked>
+            <span class="toggle__slider"></span>
+          </label>
+        </div>
+
+        <div class="setting-divider"></div>
+
+        <!-- Timer Settings -->
+        <div class="setting-row__label" style="margin-bottom: var(--space-sm);">⏱️ Phase Timers</div>
+
+        <div class="timer-grid">
+          <div class="timer-input-group">
+            <label for="timer-night">🌙 Night</label>
+            <div class="timer-input-wrap">
+              <input type="number" id="timer-night" class="input input--timer" value="60" min="15" max="300" step="15">
+              <span class="timer-input-unit">sec</span>
+            </div>
+          </div>
+          <div class="timer-input-group">
+            <label for="timer-day">☀️ Discussion</label>
+            <div class="timer-input-wrap">
+              <input type="number" id="timer-day" class="input input--timer" value="180" min="30" max="600" step="30">
+              <span class="timer-input-unit">sec</span>
+            </div>
+          </div>
+          <div class="timer-input-group">
+            <label for="timer-vote">🗳️ Voting</label>
+            <div class="timer-input-wrap">
+              <input type="number" id="timer-vote" class="input input--timer" value="30" min="15" max="120" step="15">
+              <span class="timer-input-unit">sec</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Validation Messages -->
+        <div id="settings-validation" class="settings-validation"></div>
+      </div>
+
+      <!-- Host Controls (In-Game) -->
+      <div id="host-game-controls" class="card mt-lg" style="display: none;">
+        <div class="card__title text-center" id="host-phase-title">
+          Phase: LOBBY
+        </div>
+        <div class="phase-timer mt-sm mx-auto text-center" style="display: block;">
+          <span class="icon">⏱️</span>
+          <span id="host-phase-timer" class="timer-text">00:00</span>
+        </div>
+        <button id="btn-next-phase" class="btn btn--primary btn--full mt-md">
+          Advance Phase
+        </button>
+      </div>
+
+      <!-- Start Game -->
+      <div id="start-game-container">
+        <button id="btn-start-game" class="btn btn--start btn--full">
+          🎲 Start Game
+        </button>
+        <p id="start-game-hint" class="help-text text-center">Need at least 1 player to start</p>
+      </div>
+
+      <!-- Lobby Chat -->
+      <div class="card card--sm">
+        <div class="card__title">
+          <span class="icon">💬</span>
+          Lobby Chat
+        </div>
+        <div class="message-area">
+          <div id="host-messages" class="message-area__messages"></div>
+          <div class="message-input-row">
+            <input
+              type="text"
+              id="host-msg-input"
+              class="input"
+              placeholder="Type a test message…"
+              maxlength="200"
+              autocomplete="off"
+            >
+            <button id="host-msg-send" class="btn btn--primary btn--icon" title="Send">
+              ➤
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Connection Log -->
+      <div class="connection-log">
+        <button id="host-log-toggle" class="connection-log__toggle">
+          <span class="chevron">▶</span>
+          Connection Log
+        </button>
+        <div id="host-log-entries" class="connection-log__entries"></div>
+      </div>
+
+      <!-- Leave -->
+      <button id="host-leave" class="btn btn--secondary btn--full mt-md">
+        🚪 Leave Game
+      </button>
+    </section>
+
+    <!-- ============================================================
+         SCREEN: PLAYER — Connected view & test messaging
+         ============================================================ -->
+    <section id="screen-player" class="screen">
+      <!-- Header -->
+      <div style="display: flex; align-items: center; justify-content: space-between;">
+        <div>
+          <h2 style="font-size: var(--font-size-xl); font-weight: 700;">🎮 Game Room</h2>
+          <p class="help-text">
+            Playing as <strong id="player-name">—</strong>
+          </p>
+        </div>
+        <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 8px;">
+          <span id="player-status" class="status-badge status-badge--connecting">
+            <span class="status-badge__dot"></span>
+            Connecting…
+          </span>
+          <div id="player-day-timer-container" class="phase-timer mt-sm" style="display: none;">
+            <span class="icon">☀️</span>
+            <span id="day-timer" class="timer-text">00:00</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Room Info -->
+      <div class="card card--sm">
+        <div class="section-header">Room Code</div>
+        <div class="room-code-display">
+          <span id="player-room-code" class="room-code-display__code">------</span>
+        </div>
+      </div>
+
+      <!-- Waiting Banner -->
+      <div id="player-waiting-banner" class="waiting-banner">
+        <div class="waiting-banner__icon">⏳</div>
+        <div class="waiting-banner__text">
+          <strong>Waiting for host to start the game…</strong>
+          <span>Hang tight! The host is setting things up.</span>
+        </div>
+      </div>
+
+      <!-- Player List -->
+      <div class="card card--sm">
+        <div class="card__title">
+          <span class="icon">👥</span>
+          Players in Room
+        </div>
+        <ul id="player-player-list" class="player-list">
+          <li class="player-list__empty">
+            Connecting…
+          </li>
+        </ul>
+      </div>
+
+      <!-- Lobby Chat -->
+      <div class="card card--sm">
+        <div class="card__title">
+          <span class="icon">💬</span>
+          Lobby Chat
+        </div>
+        <div class="message-area">
+          <div id="player-messages" class="message-area__messages"></div>
+          <div class="message-input-row">
+            <input
+              type="text"
+              id="player-msg-input"
+              class="input"
+              placeholder="Type a test message…"
+              maxlength="200"
+              autocomplete="off"
+            >
+            <button id="player-msg-send" class="btn btn--primary btn--icon" title="Send">
+              ➤
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Connection Log -->
+      <div class="connection-log">
+        <button id="player-log-toggle" class="connection-log__toggle">
+          <span class="chevron">▶</span>
+          Connection Log
+        </button>
+        <div id="player-log-entries" class="connection-log__entries"></div>
+      </div>
+
+      <!-- Leave -->
+      <button id="player-leave" class="btn btn--secondary btn--full mt-md">
+        🚪 Leave Game
+      </button>
+    </section>
+
+    <!-- ============================================================
+         SCREEN: ROLE REVEAL (Phase 4)
+         ============================================================ -->
+    <section id="screen-role-reveal" class="screen" style="display: none;">
+      <div class="role-reveal-container">
+        <h2 class="text-center" style="margin-bottom: var(--space-xl);">Your Role</h2>
+        
+        <div class="role-card" id="role-card" tabindex="0" role="button">
+          <div class="role-card__inner" id="role-card-inner">
+            <!-- Front of card (Hidden) -->
+            <div class="role-card__front">
+              <div class="role-card__icon">❓</div>
+              <h3>Tap to Reveal</h3>
+              <p class="help-text mt-sm">Make sure no one else is looking at your screen.</p>
+            </div>
+            
+            <!-- Back of card (Revealed) -->
+            <div class="role-card__back">
+              <div class="role-card__icon" id="reveal-icon"></div>
+              <h3 id="reveal-name" class="role-card__name"></h3>
+              <div class="role-card__team" id="reveal-team"></div>
+              <p id="reveal-desc" class="role-card__desc"></p>
+            </div>
+          </div>
+        </div>
+
+        <button id="btn-ready" class="btn btn--primary btn--full mt-xl" style="opacity: 0; pointer-events: none; transition: opacity var(--transition-base);">
+          I Understand My Role
+        </button>
+      </div>
+    </section>
+
+    <!-- ============================================================
+         SCREEN: NIGHT PHASE (Phase 5)
+         ============================================================ -->
+    <section id="screen-night" class="screen" style="display: none;">
+      <div class="night-header text-center mb-xl">
+        <h2>🌙 The Village Sleeps</h2>
+        <div class="phase-timer mt-sm">
+          <span class="icon">⏱️</span>
+          <span id="night-timer" class="timer-text">00:00</span>
+        </div>
+      </div>
+
+      <div id="night-action-container" class="card">
+        <!-- Injected via JS based on role -->
+      </div>
+    </section>
+
+    <!-- ============================================================
+         SCREEN: VOTING PHASE (Phase 6/7)
+         ============================================================ -->
+    <section id="screen-voting" class="screen" style="display: none;">
+      <div class="night-header text-center mb-xl">
+        <h2>🗳️ Time to Vote</h2>
+        <p class="help-text mt-xs">Who is the Mafia?</p>
+        <div class="phase-timer mt-sm">
+          <span class="icon">⏱️</span>
+          <span id="vote-timer" class="timer-text">00:00</span>
+        </div>
+      </div>
+
+      <div id="vote-action-container" class="card">
+        <!-- Injected via JS based on alive players -->
+      </div>
+    </section>
+
+  </div>
+
+  <!-- App Script (ES module) -->
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
