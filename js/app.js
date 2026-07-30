@@ -18,7 +18,10 @@ import {
   saveHostState,
   loadSession,
   clearSession,
+  loadHostState,
   shuffleArray,
+  normalizeLocalOrigin,
+  isLocalHost,
 } from './utils.js';
 
 import { createHost, joinAsPlayer, MSG } from './network.js';
@@ -33,6 +36,7 @@ let displayName = '';
 let hostAPI = null;
 let playerAPI = null;
 let players = []; // { playerId, displayName, connected, role (host only), alive (host only) }
+let persistedSession = null;
 
 // ---- Game State (Host Only) ----
 let gameState = {
@@ -138,27 +142,100 @@ function showScreen(name) {
   }
 }
 
+function restoreHostState(hostState) {
+  if (!hostState) return;
+
+  if (hostState.settings) {
+    Object.assign(gameSettings, hostState.settings);
+  }
+
+  if (Array.isArray(hostState.players)) {
+    players = hostState.players.map((p) => ({ ...p }));
+  }
+
+  gameState.phase = hostState.phase || gameState.phase;
+  gameState.phaseEndsAt = hostState.phaseEndsAt || 0;
+  if (hostState.nightActions) gameState.nightActions = { ...hostState.nightActions };
+  if (hostState.voteActions) gameState.voteActions = { ...hostState.voteActions };
+  if (hostState.lastNightResult) gameState.lastNightResult = hostState.lastNightResult;
+  if (hostState.lastVoteResult) gameState.lastVoteResult = hostState.lastVoteResult;
+  if (hostState.winner) gameState.winner = hostState.winner;
+
+  syncSettingsUI();
+}
+
+function syncSettingsUI() {
+  mafiaCountDisplay.textContent = gameSettings.mafiaCount;
+  doctorToggle.checked = gameSettings.doctorEnabled;
+  investigatorToggle.checked = gameSettings.investigatorEnabled;
+  timerNightInput.value = gameSettings.nightDuration;
+  timerDayInput.value = gameSettings.dayDuration;
+  timerVoteInput.value = gameSettings.voteDuration;
+}
+
+function restoreHostView() {
+  if (!isHost) return;
+
+  renderHostPlayerList();
+  if (gameState.phase !== 'LOBBY') {
+    hostSettingsCard.style.display = 'none';
+    startGameContainer.style.display = 'none';
+    hostGameControls.style.display = 'block';
+    hostPhaseTitle.textContent = `Phase: ${gameState.phase}`;
+    btnNextPhase.textContent = gameState.phase === 'ROLE_REVEAL' ? 'Start Night Phase' : 'Advance Phase';
+  } else {
+    hostSettingsCard.style.display = 'block';
+    startGameContainer.style.display = 'block';
+    hostGameControls.style.display = 'none';
+  }
+}
+
+function persistHostState() {
+  if (!isHost || !roomCode) return;
+
+  saveHostState({
+    roomCode,
+    hostPeerId: hostAPI?.peerId || null,
+    settings: { ...gameSettings },
+    players: players.map((p) => ({ ...p })),
+    phase: gameState.phase,
+    phaseEndsAt: gameState.phaseEndsAt,
+    nightActions: { ...gameState.nightActions },
+    voteActions: { ...gameState.voteActions },
+    lastNightResult: gameState.lastNightResult,
+    lastVoteResult: gameState.lastVoteResult,
+    winner: gameState.winner,
+  });
+}
+
 // ---- Initialize ----
 function init() {
+  if (isLocalHost(window.location.hostname)) {
+    const canonicalUrl = normalizeLocalOrigin(window.location.href);
+    if (canonicalUrl && window.location.href !== canonicalUrl) {
+      window.location.replace(canonicalUrl);
+      return;
+    }
+  }
+
   const hostState = loadHostState();
-  const playerSession = loadSession();
+  persistedSession = loadSession();
 
   if (hostState) {
-    // Auto-reconnect as host
-    roomCode = hostState.roomCode;
-    gameState.phase = hostState.phase;
-    players = hostState.players;
-    handleCreateGame(true); // pass true for isReconnect
+    roomCode = hostState.roomCode || '';
+    playerId = persistedSession?.playerId || generatePlayerId();
+    displayName = persistedSession?.displayName || 'Host';
+    isHost = true;
+    restoreHostState(hostState);
+    handleCreateGame(true);
+    restoreHostView();
     return;
-  } else if (playerSession) {
-    // Auto-reconnect as player
-    roomCode = playerSession.roomCode;
-    playerId = playerSession.playerId;
-    displayName = playerSession.displayName;
-    isHost = playerSession.isHost;
-    
-    // Attempt rejoin
-    handleJoinGame(true); // pass true for isReconnect
+  } else if (persistedSession) {
+    roomCode = persistedSession.roomCode || '';
+    playerId = persistedSession.playerId || generatePlayerId();
+    displayName = persistedSession.displayName || '';
+    isHost = persistedSession.isHost || false;
+    handleJoinGame(true);
     return;
   }
 
@@ -170,8 +247,8 @@ function init() {
   }
 
   // Event listeners
-  createBtn.addEventListener('click', handleCreateGame);
-  joinBtn.addEventListener('click', handleJoinGame);
+  createBtn.addEventListener('click', () => handleCreateGame());
+  joinBtn.addEventListener('click', () => handleJoinGame());
 
   // Allow Enter key on join form
   joinNameInput.addEventListener('keydown', (e) => {
@@ -248,13 +325,20 @@ function init() {
 }
 
 // ---- Create Game (Host) ----
-function handleCreateGame() {
+function handleCreateGame(isReconnect = false) {
   isHost = true;
-  roomCode = generateRoomCode();
-  playerId = generatePlayerId();
-  displayName = 'Host';
+  if (!isReconnect) {
+    roomCode = generateRoomCode();
+    playerId = generatePlayerId();
+    displayName = 'Host';
+  } else {
+    roomCode = roomCode || generateRoomCode();
+    playerId = playerId || generatePlayerId();
+    displayName = displayName || 'Host';
+  }
 
   showScreen('host');
+  restoreHostView();
 
   // Render room info
   hostRoomCode.textContent = roomCode;
@@ -266,10 +350,16 @@ function handleCreateGame() {
   hostAPI = createHost(roomCode, {
     onLog: (msg, level) => addLogEntry(hostLogEntries, msg, level),
     onPlayerJoin: (playerInfo) => {
-      players.push(playerInfo);
+      const existing = players.find((p) => p.playerId === playerInfo.playerId);
+      if (existing) {
+        Object.assign(existing, playerInfo, { connected: true });
+      } else {
+        players.push({ ...playerInfo, connected: true });
+      }
       renderHostPlayerList();
       addChatMessage(hostMessages, 'System', `${playerInfo.displayName} joined the room`, true);
       showToast(`${playerInfo.displayName} joined!`, 'success');
+      persistHostState();
     },
     onPlayerDisconnect: (pId) => {
       const p = players.find(x => x.playerId === pId);
@@ -278,7 +368,31 @@ function handleCreateGame() {
         renderHostPlayerList();
         addChatMessage(hostMessages, 'System', `${p.displayName} disconnected`, true);
         showToast(`${p.displayName} disconnected`, 'error');
+        persistHostState();
       }
+    },
+    onPlayerRejoin: (info) => {
+      const rejoined = players.find((p) => p.playerId === info.playerId);
+      if (rejoined) {
+        rejoined.connected = true;
+        rejoined.peerId = info.peerId;
+        renderHostPlayerList();
+        addChatMessage(hostMessages, 'System', `${rejoined.displayName} reconnected`, true);
+        showToast(`${rejoined.displayName} reconnected`, 'success');
+      }
+
+      if (hostAPI && rejoined?.role) {
+        hostAPI.sendToPlayer(info.peerId, {
+          type: MSG.ROLE_ASSIGNMENT,
+          payload: {
+            roleId: rejoined.role,
+            roleDef: ROLES[rejoined.role.toUpperCase()],
+          },
+        });
+      }
+
+      broadcastStateUpdate();
+      persistHostState();
     },
     onMessage: (pId, msg) => {
       if (msg.type === MSG.CHAT) {
@@ -306,12 +420,7 @@ function handleCreateGame() {
         isHost: true,
         lastKnownPhase: 'LOBBY',
       });
-      saveHostState({
-        roomCode,
-        hostPeerId: hostAPI.peerId,
-        players: [],
-        phase: 'LOBBY',
-      });
+      persistHostState();
     },
     onError: (err) => {
       if (err.type === 'unavailable-id') {
@@ -323,9 +432,9 @@ function handleCreateGame() {
 }
 
 // ---- Join Game (Player) ----
-function handleJoinGame() {
-  const code = joinRoomInput.value.trim().toUpperCase();
-  const name = joinNameInput.value.trim();
+function handleJoinGame(isReconnect = false) {
+  const code = isReconnect ? (roomCode || '').trim().toUpperCase() : joinRoomInput.value.trim().toUpperCase();
+  const name = isReconnect ? (displayName || '').trim() : joinNameInput.value.trim();
 
   if (!code || code.length < 4) {
     showToast('Please enter a valid room code.', 'error');
@@ -342,9 +451,18 @@ function handleJoinGame() {
   isHost = false;
   roomCode = code;
   displayName = name;
-  playerId = generatePlayerId();
+  if (!playerId || !isReconnect) {
+    playerId = generatePlayerId();
+  }
 
   showScreen('player');
+  if (isReconnect) {
+    playerRoomCodeDisplay.textContent = roomCode;
+    playerNameDisplay.textContent = displayName;
+    if (persistedSession?.lastKnownPhase === 'ROLE_REVEAL') {
+      showScreen('roleReveal');
+    }
+  }
 
   // Render player info
   playerRoomCodeDisplay.textContent = roomCode;
@@ -359,6 +477,14 @@ function handleJoinGame() {
       updatePlayerStatus('connected');
       renderPlayerPlayerList();
       showToast('Connected to the game!', 'success');
+
+      if (isReconnect && persistedSession?.lastKnownPhase) {
+        handleStateUpdate({
+          phase: persistedSession.lastKnownPhase,
+          phaseEndsAt: 0,
+          alivePlayers: players.filter((p) => p.connected).map((p) => ({ playerId: p.playerId, displayName: p.displayName })),
+        });
+      }
 
       // Save session for reconnection prep
       saveSession({
@@ -647,6 +773,7 @@ function handleStartGame() {
   // Automatically advance to Night phase after a short delay, or let host click next
   hostPhaseTitle.textContent = 'Phase: ROLE REVEAL';
   btnNextPhase.textContent = 'Start Night Phase';
+  persistHostState();
 }
 
 function handleNextPhase() {
@@ -674,6 +801,7 @@ function advanceToNight() {
 
   // Broadcast state to all players
   broadcastStateUpdate();
+  persistHostState();
 }
 
 function resolveNightActions() {
@@ -733,6 +861,7 @@ function resolveNightActions() {
   startHostPhaseTimer(gameState.phaseEndsAt, () => advanceToVoting());
   
   broadcastStateUpdate();
+  persistHostState();
 }
 
 function advanceToVoting() {
@@ -745,6 +874,7 @@ function advanceToVoting() {
   startHostPhaseTimer(gameState.phaseEndsAt, () => resolveVoting());
   
   broadcastStateUpdate();
+  persistHostState();
 }
 
 function resolveVoting() {
@@ -831,6 +961,7 @@ function handleGameOver(winner) {
   };
 
   broadcastStateUpdate();
+  persistHostState();
 }
 
 let hostTimerInterval = null;
@@ -1078,7 +1209,9 @@ function handleStateUpdate(payload) {
   }
 
   // Handle phase transitions
-  if (phase === 'NIGHT') {
+  if (phase === 'ROLE_REVEAL') {
+    showScreen('roleReveal');
+  } else if (phase === 'NIGHT') {
     renderNightActionUI(alivePlayers, session.lastKnownRole);
     showScreen('night');
   } else if (phase === 'DAY') {
@@ -1251,4 +1384,10 @@ function renderVotingUI(alivePlayers, myRole) {
 }
 
 // ---- Start ----
-document.addEventListener('DOMContentLoaded', init);
+document.addEventListener('DOMContentLoaded', () => {
+  init();
+  window.addEventListener('beforeunload', () => {
+    hostAPI?.destroy();
+    playerAPI?.destroy();
+  });
+});
