@@ -9,28 +9,23 @@
    - JSON message envelope: { type, payload, seq }
    ============================================================ */
 
-import { buildHostPeerId, formatTimestamp } from './utils.js';
+import { buildHostPeerId } from './utils.js';
 
 // --- ICE Server Configuration ---
-// STUN for direct P2P discovery + TURN relay fallback
 const ICE_SERVERS = [
-  // Google's free public STUN servers
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
-  // Open Relay TURN fallback (metered.ca free tier)
-  // Port 80: works through most HTTP-only firewalls
-  {
-    urls: 'turn:a.relay.metered.ca:80',
-    username: 'e7d691583df2dfab1cd52e43',
-    credential: '5kAlM/VhJwMPwVBw',
-  },
-  // Port 443 over TLS: works through HTTPS-strict firewalls
-  {
-    urls: 'turn:a.relay.metered.ca:443?transport=tcp',
-    username: 'e7d691583df2dfab1cd52e43',
-    credential: '5kAlM/VhJwMPwVBw',
-  },
 ];
+
+// --- PeerJS connection options ---
+function getPeerOptions() {
+  return {
+    debug: 1,
+    config: {
+      iceServers: ICE_SERVERS,
+    },
+  };
+}
 
 // --- Message Types ---
 export const MSG = {
@@ -54,9 +49,6 @@ let _seq = 0;
 
 /**
  * Create a message envelope.
- * @param {string} type - Message type constant
- * @param {*} payload - Message data
- * @returns {{ type: string, payload: *, seq: number, ts: number }}
  */
 function createMessage(type, payload = null) {
   return {
@@ -68,8 +60,8 @@ function createMessage(type, payload = null) {
 }
 
 // --- Heartbeat Constants ---
-const HEARTBEAT_INTERVAL = 5000; // 5 seconds
-const HEARTBEAT_TIMEOUT = HEARTBEAT_INTERVAL * 3; // 3 missed = disconnected
+const HEARTBEAT_INTERVAL = 5000;
+const HEARTBEAT_TIMEOUT = HEARTBEAT_INTERVAL * 3;
 
 /**
  * Create the Host networking layer.
@@ -79,12 +71,13 @@ const HEARTBEAT_TIMEOUT = HEARTBEAT_INTERVAL * 3; // 3 missed = disconnected
  *
  * @param {string} roomCode
  * @param {object} callbacks
- * @param {function} callbacks.onLog - (message: string, level: string) => void
- * @param {function} callbacks.onPlayerJoin - (playerInfo: object) => void
- * @param {function} callbacks.onPlayerDisconnect - (playerId: string) => void
- * @param {function} callbacks.onMessage - (playerId: string, message: object) => void
- * @param {function} callbacks.onReady - () => void
- * @param {function} callbacks.onError - (error: Error) => void
+ * @param {function} callbacks.onLog
+ * @param {function} callbacks.onPlayerJoin
+ * @param {function} callbacks.onPlayerRejoin
+ * @param {function} callbacks.onPlayerDisconnect
+ * @param {function} callbacks.onMessage
+ * @param {function} callbacks.onReady
+ * @param {function} callbacks.onError
  * @returns {object} Host API
  */
 export function createHost(roomCode, callbacks) {
@@ -98,15 +91,9 @@ export function createHost(roomCode, callbacks) {
     callbacks.onLog?.(`[HOST] ${msg}`, level);
   };
 
-  // Create the PeerJS peer with deterministic ID
   log(`Creating peer with ID: ${hostPeerId}`);
 
-  peer = new Peer(hostPeerId, {
-    config: {
-      iceServers: ICE_SERVERS,
-    },
-    debug: 1, // Minimal PeerJS debug logging
-  });
+  peer = new Peer(hostPeerId, getPeerOptions());
 
   peer.on('open', (id) => {
     log(`Peer broker connected. ID: ${id}`, 'success');
@@ -115,19 +102,19 @@ export function createHost(roomCode, callbacks) {
   });
 
   peer.on('error', (err) => {
+    if (destroyed) return;
     log(`Peer error: ${err.type} — ${err.message}`, 'error');
     callbacks.onError?.(err);
   });
 
   peer.on('disconnected', () => {
+    if (destroyed) return;
     log('Disconnected from signaling server. Attempting reconnect...', 'warn');
-    if (!destroyed) {
-      peer.reconnect();
-    }
+    peer.reconnect();
   });
 
-  // Listen for incoming player connections
   peer.on('connection', (conn) => {
+    if (destroyed) return;
     log(`Incoming connection from peer: ${conn.peer}`, 'info');
 
     conn.on('open', () => {
@@ -147,15 +134,19 @@ export function createHost(roomCode, callbacks) {
     });
   });
 
+  // --- Message Handling ---
+
   function handlePlayerMessage(conn, data) {
     const msg = typeof data === 'string' ? JSON.parse(data) : data;
 
     switch (msg.type) {
       case MSG.JOIN: {
-        // If there's an onPlayerJoin callback, let it validate the join (e.g., block mid-game joins)
+        // Let app.js validate (e.g., block mid-game joins)
         const canJoin = callbacks.onPlayerJoin?.({
           playerId: msg.payload.playerId,
           displayName: msg.payload.displayName,
+          peerId: conn.peer,
+          connected: true,
         }) !== false;
 
         if (!canJoin) {
@@ -174,6 +165,7 @@ export function createHost(roomCode, callbacks) {
           joinedAt: Date.now(),
         };
 
+        // Store the REAL PeerJS connection
         connections.set(conn.peer, {
           conn,
           playerInfo,
@@ -182,14 +174,11 @@ export function createHost(roomCode, callbacks) {
 
         log(`Player joined: ${playerInfo.displayName} (${playerInfo.playerId})`, 'success');
 
-        // Send acknowledgment with current player list
-        const playerList = getPlayerList();
         conn.send(createMessage(MSG.JOIN_ACK, {
           success: true,
-          players: playerList,
+          players: getPlayerList(),
         }));
 
-        // Notify all other players about the new joiner
         broadcastExcept(conn.peer, createMessage(MSG.PLAYER_JOINED, {
           playerId: playerInfo.playerId,
           displayName: playerInfo.displayName,
@@ -199,7 +188,6 @@ export function createHost(roomCode, callbacks) {
 
       case MSG.REJOIN: {
         const { playerId, displayName } = msg.payload;
-        // Find existing connection entry by playerId (since peerId changes on reconnect)
         let oldPeerId = null;
         let existingInfo = null;
 
@@ -212,10 +200,8 @@ export function createHost(roomCode, callbacks) {
         }
 
         if (existingInfo) {
-          // Remove old connection entry
           connections.delete(oldPeerId);
 
-          // Update info with new peerId
           existingInfo.peerId = conn.peer;
           existingInfo.connected = true;
 
@@ -234,7 +220,6 @@ export function createHost(roomCode, callbacks) {
 
           callbacks.onPlayerRejoin?.(existingInfo);
         } else {
-          // If we couldn't find them, reject
           conn.send(createMessage(MSG.JOIN_ACK, {
             success: false,
             error: 'Session not found. Game may have restarted.',
@@ -247,7 +232,6 @@ export function createHost(roomCode, callbacks) {
         const entry = connections.get(conn.peer);
         if (entry) {
           callbacks.onMessage?.(entry.playerInfo.playerId, msg);
-          // Broadcast chat to all connected players
           broadcast(createMessage(MSG.CHAT, {
             from: entry.playerInfo.displayName,
             fromId: entry.playerInfo.playerId,
@@ -273,6 +257,14 @@ export function createHost(roomCode, callbacks) {
         break;
       }
 
+      case MSG.VOTE_ACTION: {
+        const entry = connections.get(conn.peer);
+        if (entry) {
+          callbacks.onMessage?.(entry.playerInfo.playerId, msg);
+        }
+        break;
+      }
+
       default:
         log(`Unknown message type: ${msg.type}`, 'warn');
     }
@@ -285,7 +277,6 @@ export function createHost(roomCode, callbacks) {
       log(`Player disconnected: ${entry.playerInfo.displayName}`, 'warn');
       callbacks.onPlayerDisconnect?.(entry.playerInfo.playerId);
 
-      // Notify remaining players
       broadcastExcept(peerId, createMessage(MSG.PLAYER_DISCONNECTED, {
         playerId: entry.playerInfo.playerId,
         displayName: entry.playerInfo.displayName,
@@ -331,13 +322,11 @@ export function createHost(roomCode, callbacks) {
       for (const [peerId, entry] of connections) {
         if (!entry.playerInfo.connected) continue;
 
-        // Check for missed heartbeats
         if (now - entry.lastHeartbeat > HEARTBEAT_TIMEOUT) {
           handlePlayerDisconnect(peerId);
           continue;
         }
 
-        // Send heartbeat ping
         if (entry.conn.open) {
           try {
             entry.conn.send(createMessage(MSG.HEARTBEAT));
@@ -353,8 +342,8 @@ export function createHost(roomCode, callbacks) {
   return {
     get peerId() { return hostPeerId; },
     get playerCount() { return connections.size; },
-
     getPlayerList,
+    broadcast,
 
     sendToPlayer(peerId, msg) {
       const entry = connections.get(peerId);
@@ -375,10 +364,10 @@ export function createHost(roomCode, callbacks) {
       destroyed = true;
       if (heartbeatTimer) clearInterval(heartbeatTimer);
       for (const [, entry] of connections) {
-        entry.conn.close();
+        try { entry.conn.close(); } catch {}
       }
       connections.clear();
-      peer.destroy();
+      try { peer?.destroy(); } catch {}
       log('Host destroyed', 'info');
     },
   };
@@ -387,20 +376,13 @@ export function createHost(roomCode, callbacks) {
 /**
  * Create the Player networking layer.
  *
- * The player creates a PeerJS peer (random ID) and connects
+ * The player creates a PeerJS peer and connects
  * to the host's deterministic peer ID.
  *
  * @param {string} roomCode
  * @param {string} playerId
  * @param {string} displayName
  * @param {object} callbacks
- * @param {function} callbacks.onLog - (message: string, level: string) => void
- * @param {function} callbacks.onConnected - (playerList: array) => void
- * @param {function} callbacks.onDisconnected - () => void
- * @param {function} callbacks.onMessage - (message: object) => void
- * @param {function} callbacks.onPlayerJoined - (playerInfo: object) => void
- * @param {function} callbacks.onPlayerDisconnected - (playerInfo: object) => void
- * @param {function} callbacks.onError - (error: Error) => void
  * @param {boolean} isReconnect
  * @returns {object} Player API
  */
@@ -416,12 +398,7 @@ export function joinAsPlayer(roomCode, playerId, displayName, callbacks, isRecon
 
   log(`Creating peer and connecting to host: ${hostPeerId}`);
 
-  peer = new Peer(undefined, {
-    config: {
-      iceServers: ICE_SERVERS,
-    },
-    debug: 1,
-  });
+  peer = new Peer(`${playerId}-p`, getPeerOptions());
 
   peer.on('open', (id) => {
     log(`Peer broker connected. My ID: ${id}`, 'success');
@@ -434,7 +411,7 @@ export function joinAsPlayer(roomCode, playerId, displayName, callbacks, isRecon
     conn.on('open', () => {
       log('Data channel open with host!', 'success');
 
-      // Send JOIN or REJOIN message
+      // Send JOIN or REJOIN
       const msgType = isReconnect ? MSG.REJOIN : MSG.JOIN;
       conn.send(createMessage(msgType, {
         playerId,
@@ -468,10 +445,9 @@ export function joinAsPlayer(roomCode, playerId, displayName, callbacks, isRecon
   });
 
   peer.on('disconnected', () => {
+    if (destroyed) return;
     log('Disconnected from signaling server. Attempting reconnect...', 'warn');
-    if (!destroyed) {
-      peer.reconnect();
-    }
+    peer.reconnect();
   });
 
   function handleHostMessage(data) {
@@ -507,7 +483,6 @@ export function joinAsPlayer(roomCode, playerId, displayName, callbacks, isRecon
         break;
 
       case MSG.HEARTBEAT:
-        // Respond to heartbeat
         if (conn?.open) {
           conn.send(createMessage(MSG.HEARTBEAT_ACK));
         }
@@ -547,8 +522,8 @@ export function joinAsPlayer(roomCode, playerId, displayName, callbacks, isRecon
 
     destroy() {
       destroyed = true;
-      if (conn) conn.close();
-      peer.destroy();
+      try { if (conn) conn.close(); } catch {}
+      try { peer?.destroy(); } catch {}
       log('Player destroyed', 'info');
     },
   };

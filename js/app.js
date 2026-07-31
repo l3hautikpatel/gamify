@@ -18,11 +18,14 @@ import {
   saveHostState,
   loadSession,
   clearSession,
+  loadHostState,
   shuffleArray,
-} from './utils.js';
+  normalizeLocalOrigin,
+  isLocalHost,
+} from './utils.js?v=2';
 
-import { createHost, joinAsPlayer, MSG } from './network.js';
-import { ROLES } from './roles.js';
+import { createHost, joinAsPlayer, MSG } from './network.js?v=3';
+import { ROLES } from './roles.js?v=2';
 
 // ---- State ----
 let currentScreen = 'home';
@@ -33,6 +36,7 @@ let displayName = '';
 let hostAPI = null;
 let playerAPI = null;
 let players = []; // { playerId, displayName, connected, role (host only), alive (host only) }
+let persistedSession = null;
 
 // ---- Game State (Host Only) ----
 let gameState = {
@@ -60,6 +64,8 @@ const screens = {
   roleReveal: document.getElementById('screen-role-reveal'),
   night: document.getElementById('screen-night'),
   voting: document.getElementById('screen-voting'),
+  gameOver: document.getElementById('screen-game-over'),
+  guide: document.getElementById('screen-guide'),
 };
 
 // Phase UIs
@@ -74,6 +80,14 @@ const joinRoomInput = document.getElementById('join-room-code');
 const joinNameInput = document.getElementById('join-name');
 const joinBtn = document.getElementById('btn-join');
 const createBtn = document.getElementById('btn-create');
+const btnShowGuide = document.getElementById('btn-show-guide');
+const btnGuideBack = document.getElementById('btn-guide-back');
+
+// Game Over elements
+const gameOverTitle = document.getElementById('game-over-title');
+const gameOverSubtitle = document.getElementById('game-over-subtitle');
+const gameOverPlayers = document.getElementById('game-over-players');
+const btnGameOverBack = document.getElementById('btn-game-over-back');
 
 // Host screen elements
 const hostRoomCode = document.getElementById('host-room-code');
@@ -138,27 +152,100 @@ function showScreen(name) {
   }
 }
 
+function restoreHostState(hostState) {
+  if (!hostState) return;
+
+  if (hostState.settings) {
+    Object.assign(gameSettings, hostState.settings);
+  }
+
+  if (Array.isArray(hostState.players)) {
+    players = hostState.players.map((p) => ({ ...p }));
+  }
+
+  gameState.phase = hostState.phase || gameState.phase;
+  gameState.phaseEndsAt = hostState.phaseEndsAt || 0;
+  if (hostState.nightActions) gameState.nightActions = { ...hostState.nightActions };
+  if (hostState.voteActions) gameState.voteActions = { ...hostState.voteActions };
+  if (hostState.lastNightResult) gameState.lastNightResult = hostState.lastNightResult;
+  if (hostState.lastVoteResult) gameState.lastVoteResult = hostState.lastVoteResult;
+  if (hostState.winner) gameState.winner = hostState.winner;
+
+  syncSettingsUI();
+}
+
+function syncSettingsUI() {
+  mafiaCountDisplay.textContent = gameSettings.mafiaCount;
+  doctorToggle.checked = gameSettings.doctorEnabled;
+  investigatorToggle.checked = gameSettings.investigatorEnabled;
+  timerNightInput.value = gameSettings.nightDuration;
+  timerDayInput.value = gameSettings.dayDuration;
+  timerVoteInput.value = gameSettings.voteDuration;
+}
+
+function restoreHostView() {
+  if (!isHost) return;
+
+  renderHostPlayerList();
+  if (gameState.phase !== 'LOBBY') {
+    hostSettingsCard.style.display = 'none';
+    startGameContainer.style.display = 'none';
+    hostGameControls.style.display = 'block';
+    hostPhaseTitle.textContent = `Phase: ${gameState.phase}`;
+    btnNextPhase.textContent = gameState.phase === 'ROLE_REVEAL' ? 'Start Night Phase' : 'Advance Phase';
+  } else {
+    hostSettingsCard.style.display = 'block';
+    startGameContainer.style.display = 'block';
+    hostGameControls.style.display = 'none';
+  }
+}
+
+function persistHostState() {
+  if (!isHost || !roomCode) return;
+
+  saveHostState({
+    roomCode,
+    hostPeerId: hostAPI?.peerId || null,
+    settings: { ...gameSettings },
+    players: players.map((p) => ({ ...p })),
+    phase: gameState.phase,
+    phaseEndsAt: gameState.phaseEndsAt,
+    nightActions: { ...gameState.nightActions },
+    voteActions: { ...gameState.voteActions },
+    lastNightResult: gameState.lastNightResult,
+    lastVoteResult: gameState.lastVoteResult,
+    winner: gameState.winner,
+  });
+}
+
 // ---- Initialize ----
 function init() {
+  if (isLocalHost(window.location.hostname)) {
+    const canonicalUrl = normalizeLocalOrigin(window.location.href);
+    if (canonicalUrl && window.location.href !== canonicalUrl) {
+      window.location.replace(canonicalUrl);
+      return;
+    }
+  }
+
   const hostState = loadHostState();
-  const playerSession = loadSession();
+  persistedSession = loadSession();
 
   if (hostState) {
-    // Auto-reconnect as host
-    roomCode = hostState.roomCode;
-    gameState.phase = hostState.phase;
-    players = hostState.players;
-    handleCreateGame(true); // pass true for isReconnect
+    roomCode = hostState.roomCode || '';
+    playerId = persistedSession?.playerId || generatePlayerId();
+    displayName = persistedSession?.displayName || 'Host';
+    isHost = true;
+    restoreHostState(hostState);
+    handleCreateGame(true);
+    restoreHostView();
     return;
-  } else if (playerSession) {
-    // Auto-reconnect as player
-    roomCode = playerSession.roomCode;
-    playerId = playerSession.playerId;
-    displayName = playerSession.displayName;
-    isHost = playerSession.isHost;
-    
-    // Attempt rejoin
-    handleJoinGame(true); // pass true for isReconnect
+  } else if (persistedSession) {
+    roomCode = persistedSession.roomCode || '';
+    playerId = persistedSession.playerId || generatePlayerId();
+    displayName = persistedSession.displayName || '';
+    isHost = persistedSession.isHost || false;
+    handleJoinGame(true);
     return;
   }
 
@@ -170,18 +257,37 @@ function init() {
   }
 
   // Event listeners
-  createBtn.addEventListener('click', handleCreateGame);
-  joinBtn.addEventListener('click', handleJoinGame);
-
-  // Allow Enter key on join form
-  joinNameInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') handleJoinGame();
-  });
-  joinRoomInput.addEventListener('keydown', (e) => {
+  createBtn.addEventListener('click', () => handleCreateGame());
+  joinBtn.addEventListener('click', () => handleJoinGame());
+  
+  // Enter key support for join
+  joinRoomInput.addEventListener('keypress', (e) => {
     if (e.key === 'Enter') joinNameInput.focus();
   });
+  joinNameInput.addEventListener('keypress', (e) => {
+    if (e.key === 'Enter') handleJoinGame();
+  });
 
-  // Force room code uppercase
+  // Guide screen listeners
+  btnShowGuide.addEventListener('click', () => {
+    showScreen('guide');
+  });
+  btnGuideBack.addEventListener('click', () => {
+    showScreen('home');
+  });
+  btnGameOverBack.addEventListener('click', () => {
+    showScreen('home'); // or lobby, but returning to home is safer for players
+    if (isHost) {
+      hostAPI?.destroy();
+    } else {
+      playerAPI?.destroy();
+    }
+    clearSession();
+    window.location.search = '';
+    window.location.reload();
+  });
+
+  // Host events room code uppercase
   joinRoomInput.addEventListener('input', () => {
     joinRoomInput.value = joinRoomInput.value.toUpperCase().replace(/[^A-Z0-9]/g, '');
   });
@@ -248,13 +354,20 @@ function init() {
 }
 
 // ---- Create Game (Host) ----
-function handleCreateGame() {
+function handleCreateGame(isReconnect = false) {
   isHost = true;
-  roomCode = generateRoomCode();
-  playerId = generatePlayerId();
-  displayName = 'Host';
+  if (!isReconnect) {
+    roomCode = generateRoomCode();
+    playerId = generatePlayerId();
+    displayName = 'Host';
+  } else {
+    roomCode = roomCode || generateRoomCode();
+    playerId = playerId || generatePlayerId();
+    displayName = displayName || 'Host';
+  }
 
   showScreen('host');
+  restoreHostView();
 
   // Render room info
   hostRoomCode.textContent = roomCode;
@@ -266,10 +379,16 @@ function handleCreateGame() {
   hostAPI = createHost(roomCode, {
     onLog: (msg, level) => addLogEntry(hostLogEntries, msg, level),
     onPlayerJoin: (playerInfo) => {
-      players.push(playerInfo);
+      const existing = players.find((p) => p.playerId === playerInfo.playerId);
+      if (existing) {
+        Object.assign(existing, playerInfo, { connected: true });
+      } else {
+        players.push({ ...playerInfo, connected: true });
+      }
       renderHostPlayerList();
       addChatMessage(hostMessages, 'System', `${playerInfo.displayName} joined the room`, true);
       showToast(`${playerInfo.displayName} joined!`, 'success');
+      persistHostState();
     },
     onPlayerDisconnect: (pId) => {
       const p = players.find(x => x.playerId === pId);
@@ -278,7 +397,31 @@ function handleCreateGame() {
         renderHostPlayerList();
         addChatMessage(hostMessages, 'System', `${p.displayName} disconnected`, true);
         showToast(`${p.displayName} disconnected`, 'error');
+        persistHostState();
       }
+    },
+    onPlayerRejoin: (info) => {
+      const rejoined = players.find((p) => p.playerId === info.playerId);
+      if (rejoined) {
+        rejoined.connected = true;
+        rejoined.peerId = info.peerId;
+        renderHostPlayerList();
+        addChatMessage(hostMessages, 'System', `${rejoined.displayName} reconnected`, true);
+        showToast(`${rejoined.displayName} reconnected`, 'success');
+      }
+
+      if (hostAPI && rejoined?.role) {
+        hostAPI.sendToPlayer(info.peerId, {
+          type: MSG.ROLE_ASSIGNMENT,
+          payload: {
+            roleId: rejoined.role,
+            roleDef: ROLES[rejoined.role.toUpperCase()],
+          },
+        });
+      }
+
+      broadcastStateUpdate();
+      persistHostState();
     },
     onMessage: (pId, msg) => {
       if (msg.type === MSG.CHAT) {
@@ -306,12 +449,7 @@ function handleCreateGame() {
         isHost: true,
         lastKnownPhase: 'LOBBY',
       });
-      saveHostState({
-        roomCode,
-        hostPeerId: hostAPI.peerId,
-        players: [],
-        phase: 'LOBBY',
-      });
+      persistHostState();
     },
     onError: (err) => {
       if (err.type === 'unavailable-id') {
@@ -323,9 +461,9 @@ function handleCreateGame() {
 }
 
 // ---- Join Game (Player) ----
-function handleJoinGame() {
-  const code = joinRoomInput.value.trim().toUpperCase();
-  const name = joinNameInput.value.trim();
+function handleJoinGame(isReconnect = false) {
+  const code = isReconnect ? (roomCode || '').trim().toUpperCase() : joinRoomInput.value.trim().toUpperCase();
+  const name = isReconnect ? (displayName || '').trim() : joinNameInput.value.trim();
 
   if (!code || code.length < 4) {
     showToast('Please enter a valid room code.', 'error');
@@ -342,9 +480,18 @@ function handleJoinGame() {
   isHost = false;
   roomCode = code;
   displayName = name;
-  playerId = generatePlayerId();
+  if (!playerId || !isReconnect) {
+    playerId = generatePlayerId();
+  }
 
   showScreen('player');
+  if (isReconnect) {
+    playerRoomCodeDisplay.textContent = roomCode;
+    playerNameDisplay.textContent = displayName;
+    if (persistedSession?.lastKnownPhase === 'ROLE_REVEAL') {
+      showScreen('roleReveal');
+    }
+  }
 
   // Render player info
   playerRoomCodeDisplay.textContent = roomCode;
@@ -359,6 +506,14 @@ function handleJoinGame() {
       updatePlayerStatus('connected');
       renderPlayerPlayerList();
       showToast('Connected to the game!', 'success');
+
+      if (isReconnect && persistedSession?.lastKnownPhase) {
+        handleStateUpdate({
+          phase: persistedSession.lastKnownPhase,
+          phaseEndsAt: 0,
+          alivePlayers: players.filter((p) => p.connected).map((p) => ({ playerId: p.playerId, displayName: p.displayName })),
+        });
+      }
 
       // Save session for reconnection prep
       saveSession({
@@ -647,6 +802,9 @@ function handleStartGame() {
   // Automatically advance to Night phase after a short delay, or let host click next
   hostPhaseTitle.textContent = 'Phase: ROLE REVEAL';
   btnNextPhase.textContent = 'Start Night Phase';
+  
+  broadcastStateUpdate(); // Explicitly push new phase to players
+  persistHostState();
 }
 
 function handleNextPhase() {
@@ -674,6 +832,7 @@ function advanceToNight() {
 
   // Broadcast state to all players
   broadcastStateUpdate();
+  persistHostState();
 }
 
 function resolveNightActions() {
@@ -733,6 +892,7 @@ function resolveNightActions() {
   startHostPhaseTimer(gameState.phaseEndsAt, () => advanceToVoting());
   
   broadcastStateUpdate();
+  persistHostState();
 }
 
 function advanceToVoting() {
@@ -745,6 +905,7 @@ function advanceToVoting() {
   startHostPhaseTimer(gameState.phaseEndsAt, () => resolveVoting());
   
   broadcastStateUpdate();
+  persistHostState();
 }
 
 function resolveVoting() {
@@ -813,6 +974,8 @@ function checkWinCondition() {
 function handleGameOver(winner) {
   gameState.phase = 'GAME_OVER';
   gameState.winner = winner;
+  
+  // Show host the game over screen too, so they see the same results
   hostPhaseTitle.textContent = `Game Over - ${winner} Wins!`;
   btnNextPhase.textContent = 'Back to Lobby';
   
@@ -827,10 +990,23 @@ function handleGameOver(winner) {
     hostGameControls.style.display = 'none';
     startGameBtn.textContent = '🎲 Start Game';
     startGameBtn.disabled = false;
+    
+    // Reset player roles/alive status for next game
+    players.forEach(p => {
+      p.role = null;
+      p.alive = true;
+    });
+    
     broadcastStateUpdate();
+    persistHostState();
   };
 
   broadcastStateUpdate();
+  persistHostState();
+  
+  // Also render game over screen on host's own device if they want to look at it
+  renderGameOverUI(winner, players);
+  showScreen('gameOver');
 }
 
 let hostTimerInterval = null;
@@ -868,7 +1044,14 @@ function broadcastStateUpdate() {
     alivePlayers: players.filter(p => p.connected && p.alive).map(p => ({
       playerId: p.playerId,
       displayName: p.displayName
-    }))
+    })),
+    // For GAME_OVER screen, we need all players and their roles
+    allPlayers: gameState.phase === 'GAME_OVER' ? players.map(p => ({
+      playerId: p.playerId,
+      displayName: p.displayName,
+      role: p.role,
+      alive: p.alive
+    })) : null
   };
 
   const msg = {
@@ -876,10 +1059,15 @@ function broadcastStateUpdate() {
     payload: statePayload
   };
 
-  // Broadcast to all connected players
-  players.filter(p => p.connected).forEach(p => {
-    hostAPI.sendToPlayer(p.peerId, msg);
-  });
+  // Broadcast to all connected players directly via network layer
+  if (hostAPI.broadcast) {
+    hostAPI.broadcast(msg);
+  } else {
+    // Fallback if not updated
+    players.filter(p => p.connected).forEach(p => {
+      hostAPI.sendToPlayer(p.peerId, msg);
+    });
+  }
 }
 
 // ---- Render Player's view of Player List ----
@@ -1028,13 +1216,13 @@ function escapeHtml(str) {
 let playerTimerInterval = null;
 
 function handleStateUpdate(payload) {
-  const { phase, phaseEndsAt, alivePlayers, lastNightResult, lastVoteResult, winner } = payload;
+  const { phase, phaseEndsAt, alivePlayers, lastNightResult, lastVoteResult, winner, allPlayers } = payload;
   const session = loadSession() || {};
   session.lastKnownPhase = phase;
   saveSession(session);
 
   // Sync alive status
-  if (alivePlayers) {
+  if (alivePlayers && phase !== 'GAME_OVER') {
     players.forEach(p => {
       p.alive = alivePlayers.some(ap => ap.playerId === p.playerId);
     });
@@ -1078,7 +1266,9 @@ function handleStateUpdate(payload) {
   }
 
   // Handle phase transitions
-  if (phase === 'NIGHT') {
+  if (phase === 'ROLE_REVEAL') {
+    showScreen('roleReveal');
+  } else if (phase === 'NIGHT') {
     renderNightActionUI(alivePlayers, session.lastKnownRole);
     showScreen('night');
   } else if (phase === 'DAY') {
@@ -1107,9 +1297,59 @@ function handleStateUpdate(payload) {
     renderVotingUI(alivePlayers, session.lastKnownRole);
     showScreen('voting');
   } else if (phase === 'GAME_OVER') {
-    showScreen('player');
+    renderGameOverUI(winner, allPlayers);
+    showScreen('gameOver');
     showToast(`Game Over! ${winner} Wins!`, 'success');
   }
+}
+
+function renderGameOverUI(winner, allPlayersList) {
+  if (!allPlayersList) return;
+  
+  gameOverTitle.textContent = 'Game Over!';
+  
+  if (winner === 'VILLAGE') {
+    gameOverSubtitle.textContent = 'The Village has eliminated the Mafia!';
+    gameOverSubtitle.style.color = 'var(--color-village)';
+  } else {
+    gameOverSubtitle.textContent = 'The Mafia has taken over the town!';
+    gameOverSubtitle.style.color = 'var(--color-mafia)';
+  }
+
+  // Sort: alive first, then dead
+  const sorted = [...allPlayersList].sort((a, b) => {
+    if (a.alive === b.alive) return 0;
+    return a.alive ? -1 : 1;
+  });
+
+  gameOverPlayers.innerHTML = sorted.map(p => {
+    const isDead = !p.alive;
+    let roleName = 'Unknown';
+    let roleColor = 'var(--color-text-muted)';
+    
+    if (p.role) {
+      const def = ROLES[p.role.toUpperCase()];
+      if (def) {
+        roleName = `${def.icon} ${def.name}`;
+        roleColor = def.team === 'mafia' ? 'var(--color-mafia)' : 'var(--color-village)';
+      }
+    }
+    
+    return `
+      <li class="player-item ${isDead ? 'is-dead' : ''}">
+        <div class="player-item__avatar">${isDead ? '💀' : getInitial(p.displayName)}</div>
+        <div style="flex: 1;">
+          <span class="player-item__name" style="${isDead ? 'text-decoration: line-through;' : ''}">${escapeHtml(p.displayName)}</span>
+          <div style="font-size: var(--font-size-xs); color: ${roleColor}; margin-top: 2px;">
+            ${roleName}
+          </div>
+        </div>
+        <span class="player-item__status">
+          ${isDead ? '<span style="color:var(--color-text-muted); font-size:var(--font-size-xs);">Eliminated</span>' : '<span style="color:var(--color-success); font-size:var(--font-size-xs);">Survived</span>'}
+        </span>
+      </li>
+    `;
+  }).join('');
 }
 
 function renderNightActionUI(alivePlayers, myRole) {
@@ -1251,4 +1491,10 @@ function renderVotingUI(alivePlayers, myRole) {
 }
 
 // ---- Start ----
-document.addEventListener('DOMContentLoaded', init);
+document.addEventListener('DOMContentLoaded', () => {
+  init();
+  window.addEventListener('beforeunload', () => {
+    hostAPI?.destroy();
+    playerAPI?.destroy();
+  });
+});

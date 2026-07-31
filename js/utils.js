@@ -20,14 +20,15 @@ export function generateRoomCode() {
  * This is critical for reconnection — see Section 4 & 7 of the spec.
  */
 export function buildHostPeerId(roomCode) {
-  return `mafia-${roomCode}-host`;
+  const normalized = (roomCode || '').toLowerCase().trim();
+  return `mafia-${normalized}-host`;
 }
 
 /**
  * Build a shareable join link for a room.
  */
 export function buildShareableLink(roomCode) {
-  const url = new URL(window.location.href);
+  const url = new URL(normalizeLocalOrigin(window.location.href));
   url.search = '';
   url.hash = '';
   url.searchParams.set('room', roomCode);
@@ -39,7 +40,10 @@ export function buildShareableLink(roomCode) {
  * Used to identify players across reconnections — not the display name.
  */
 export function generatePlayerId() {
-  return 'p_' + crypto.randomUUID().slice(0, 8);
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+    return 'p_' + crypto.randomUUID().slice(0, 8);
+  }
+  return 'p_' + Math.random().toString(36).substring(2, 10);
 }
 
 /**
@@ -67,6 +71,21 @@ export function getInitial(name) {
 export function getRoomCodeFromURL() {
   const params = new URLSearchParams(window.location.search);
   return params.get('room') || '';
+}
+
+export function isLocalHost(hostname = '') {
+  const normalized = (hostname || '').toLowerCase();
+  return normalized === 'localhost' || normalized === '127.0.0.1' || normalized === '::1' || normalized === '0.0.0.0';
+}
+
+export function normalizeLocalOrigin(url = window.location.href) {
+  if (typeof window === 'undefined') return url;
+
+  const parsed = new URL(url);
+  if (!isLocalHost(parsed.hostname)) return url;
+
+  parsed.hostname = '127.0.0.1';
+  return parsed.toString();
 }
 
 /**
@@ -116,12 +135,42 @@ export function showToast(message, type = 'info') {
 }
 
 /**
+ * Track whether this tab is allowed to auto-restore a session.
+ * This prevents a new browser tab from inheriting the host/player session
+ * from shared localStorage and jumping into the wrong screen.
+ */
+function setRestoreToken() {
+  try {
+    sessionStorage.setItem('mafia_restore_token', '1');
+  } catch {
+    // ignore
+  }
+}
+
+function clearRestoreToken() {
+  try {
+    sessionStorage.removeItem('mafia_restore_token');
+  } catch {
+    // ignore
+  }
+}
+
+function canAutoRestore() {
+  try {
+    return sessionStorage.getItem('mafia_restore_token') === '1';
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Save session data to localStorage.
  * Even in Phase 1, we prep the session structure for future reconnection.
  */
 export function saveSession(data) {
   try {
     localStorage.setItem('mafia_session', JSON.stringify(data));
+    setRestoreToken();
   } catch {
     // localStorage might be full or blocked
     console.warn('Could not save session to localStorage');
@@ -132,6 +181,8 @@ export function saveSession(data) {
  * Load session data from localStorage.
  */
 export function loadSession() {
+  if (!canAutoRestore()) return null;
+
   try {
     const raw = localStorage.getItem('mafia_session');
     return raw ? JSON.parse(raw) : null;
@@ -147,6 +198,7 @@ export function clearSession() {
   try {
     localStorage.removeItem('mafia_session');
     localStorage.removeItem('mafia_host_state');
+    clearRestoreToken();
   } catch {
     // ignore
   }
@@ -158,6 +210,7 @@ export function clearSession() {
 export function saveHostState(data) {
   try {
     localStorage.setItem('mafia_host_state', JSON.stringify(data));
+    setRestoreToken();
   } catch {
     console.warn('Could not save host state to localStorage');
   }
@@ -167,6 +220,8 @@ export function saveHostState(data) {
  * Load host state from localStorage.
  */
 export function loadHostState() {
+  if (!canAutoRestore()) return null;
+
   try {
     const raw = localStorage.getItem('mafia_host_state');
     return raw ? JSON.parse(raw) : null;
