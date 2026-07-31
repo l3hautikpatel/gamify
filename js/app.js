@@ -22,10 +22,10 @@ import {
   shuffleArray,
   normalizeLocalOrigin,
   isLocalHost,
-} from './utils.js';
+} from './utils.js?v=2';
 
-import { createHost, joinAsPlayer, MSG } from './network.js';
-import { ROLES } from './roles.js';
+import { createHost, joinAsPlayer, MSG } from './network.js?v=3';
+import { ROLES } from './roles.js?v=2';
 
 // ---- State ----
 let currentScreen = 'home';
@@ -64,6 +64,8 @@ const screens = {
   roleReveal: document.getElementById('screen-role-reveal'),
   night: document.getElementById('screen-night'),
   voting: document.getElementById('screen-voting'),
+  gameOver: document.getElementById('screen-game-over'),
+  guide: document.getElementById('screen-guide'),
 };
 
 // Phase UIs
@@ -78,6 +80,14 @@ const joinRoomInput = document.getElementById('join-room-code');
 const joinNameInput = document.getElementById('join-name');
 const joinBtn = document.getElementById('btn-join');
 const createBtn = document.getElementById('btn-create');
+const btnShowGuide = document.getElementById('btn-show-guide');
+const btnGuideBack = document.getElementById('btn-guide-back');
+
+// Game Over elements
+const gameOverTitle = document.getElementById('game-over-title');
+const gameOverSubtitle = document.getElementById('game-over-subtitle');
+const gameOverPlayers = document.getElementById('game-over-players');
+const btnGameOverBack = document.getElementById('btn-game-over-back');
 
 // Host screen elements
 const hostRoomCode = document.getElementById('host-room-code');
@@ -249,16 +259,35 @@ function init() {
   // Event listeners
   createBtn.addEventListener('click', () => handleCreateGame());
   joinBtn.addEventListener('click', () => handleJoinGame());
-
-  // Allow Enter key on join form
-  joinNameInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') handleJoinGame();
-  });
-  joinRoomInput.addEventListener('keydown', (e) => {
+  
+  // Enter key support for join
+  joinRoomInput.addEventListener('keypress', (e) => {
     if (e.key === 'Enter') joinNameInput.focus();
   });
+  joinNameInput.addEventListener('keypress', (e) => {
+    if (e.key === 'Enter') handleJoinGame();
+  });
 
-  // Force room code uppercase
+  // Guide screen listeners
+  btnShowGuide.addEventListener('click', () => {
+    showScreen('guide');
+  });
+  btnGuideBack.addEventListener('click', () => {
+    showScreen('home');
+  });
+  btnGameOverBack.addEventListener('click', () => {
+    showScreen('home'); // or lobby, but returning to home is safer for players
+    if (isHost) {
+      hostAPI?.destroy();
+    } else {
+      playerAPI?.destroy();
+    }
+    clearSession();
+    window.location.search = '';
+    window.location.reload();
+  });
+
+  // Host events room code uppercase
   joinRoomInput.addEventListener('input', () => {
     joinRoomInput.value = joinRoomInput.value.toUpperCase().replace(/[^A-Z0-9]/g, '');
   });
@@ -943,6 +972,8 @@ function checkWinCondition() {
 function handleGameOver(winner) {
   gameState.phase = 'GAME_OVER';
   gameState.winner = winner;
+  
+  // Show host the game over screen too, so they see the same results
   hostPhaseTitle.textContent = `Game Over - ${winner} Wins!`;
   btnNextPhase.textContent = 'Back to Lobby';
   
@@ -957,11 +988,23 @@ function handleGameOver(winner) {
     hostGameControls.style.display = 'none';
     startGameBtn.textContent = '🎲 Start Game';
     startGameBtn.disabled = false;
+    
+    // Reset player roles/alive status for next game
+    players.forEach(p => {
+      p.role = null;
+      p.alive = true;
+    });
+    
     broadcastStateUpdate();
+    persistHostState();
   };
 
   broadcastStateUpdate();
   persistHostState();
+  
+  // Also render game over screen on host's own device if they want to look at it
+  renderGameOverUI(winner, players);
+  showScreen('gameOver');
 }
 
 let hostTimerInterval = null;
@@ -999,7 +1042,14 @@ function broadcastStateUpdate() {
     alivePlayers: players.filter(p => p.connected && p.alive).map(p => ({
       playerId: p.playerId,
       displayName: p.displayName
-    }))
+    })),
+    // For GAME_OVER screen, we need all players and their roles
+    allPlayers: gameState.phase === 'GAME_OVER' ? players.map(p => ({
+      playerId: p.playerId,
+      displayName: p.displayName,
+      role: p.role,
+      alive: p.alive
+    })) : null
   };
 
   const msg = {
@@ -1159,13 +1209,13 @@ function escapeHtml(str) {
 let playerTimerInterval = null;
 
 function handleStateUpdate(payload) {
-  const { phase, phaseEndsAt, alivePlayers, lastNightResult, lastVoteResult, winner } = payload;
+  const { phase, phaseEndsAt, alivePlayers, lastNightResult, lastVoteResult, winner, allPlayers } = payload;
   const session = loadSession() || {};
   session.lastKnownPhase = phase;
   saveSession(session);
 
   // Sync alive status
-  if (alivePlayers) {
+  if (alivePlayers && phase !== 'GAME_OVER') {
     players.forEach(p => {
       p.alive = alivePlayers.some(ap => ap.playerId === p.playerId);
     });
@@ -1240,9 +1290,59 @@ function handleStateUpdate(payload) {
     renderVotingUI(alivePlayers, session.lastKnownRole);
     showScreen('voting');
   } else if (phase === 'GAME_OVER') {
-    showScreen('player');
+    renderGameOverUI(winner, allPlayers);
+    showScreen('gameOver');
     showToast(`Game Over! ${winner} Wins!`, 'success');
   }
+}
+
+function renderGameOverUI(winner, allPlayersList) {
+  if (!allPlayersList) return;
+  
+  gameOverTitle.textContent = 'Game Over!';
+  
+  if (winner === 'VILLAGE') {
+    gameOverSubtitle.textContent = 'The Village has eliminated the Mafia!';
+    gameOverSubtitle.style.color = 'var(--color-village)';
+  } else {
+    gameOverSubtitle.textContent = 'The Mafia has taken over the town!';
+    gameOverSubtitle.style.color = 'var(--color-mafia)';
+  }
+
+  // Sort: alive first, then dead
+  const sorted = [...allPlayersList].sort((a, b) => {
+    if (a.alive === b.alive) return 0;
+    return a.alive ? -1 : 1;
+  });
+
+  gameOverPlayers.innerHTML = sorted.map(p => {
+    const isDead = !p.alive;
+    let roleName = 'Unknown';
+    let roleColor = 'var(--color-text-muted)';
+    
+    if (p.role) {
+      const def = ROLES[p.role.toUpperCase()];
+      if (def) {
+        roleName = `${def.icon} ${def.name}`;
+        roleColor = def.team === 'mafia' ? 'var(--color-mafia)' : 'var(--color-village)';
+      }
+    }
+    
+    return `
+      <li class="player-item ${isDead ? 'is-dead' : ''}">
+        <div class="player-item__avatar">${isDead ? '💀' : getInitial(p.displayName)}</div>
+        <div style="flex: 1;">
+          <span class="player-item__name" style="${isDead ? 'text-decoration: line-through;' : ''}">${escapeHtml(p.displayName)}</span>
+          <div style="font-size: var(--font-size-xs); color: ${roleColor}; margin-top: 2px;">
+            ${roleName}
+          </div>
+        </div>
+        <span class="player-item__status">
+          ${isDead ? '<span style="color:var(--color-text-muted); font-size:var(--font-size-xs);">Eliminated</span>' : '<span style="color:var(--color-success); font-size:var(--font-size-xs);">Survived</span>'}
+        </span>
+      </li>
+    `;
+  }).join('');
 }
 
 function renderNightActionUI(alivePlayers, myRole) {

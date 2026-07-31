@@ -9,63 +9,23 @@
    - JSON message envelope: { type, payload, seq }
    ============================================================ */
 
-import { buildHostPeerId, formatTimestamp } from './utils.js';
+import { buildHostPeerId } from './utils.js';
 
+// --- ICE Server Configuration ---
+const ICE_SERVERS = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' },
+];
+
+// --- PeerJS connection options ---
 function getPeerOptions() {
   return {
-    host: '0.peerjs.com',
-    port: 443,
-    secure: true,
-    path: '/peerjs',
-    debug: 2,
+    debug: 1,
     config: {
       iceServers: ICE_SERVERS,
     },
   };
 }
-
-function getTransportStorageKey(roomCode) {
-  return `mafia_transport_${(roomCode || '').toUpperCase()}`;
-}
-
-function isLocalTestingEnvironment() {
-  if (typeof window === 'undefined') return true;
-
-  const hostname = (window.location.hostname || '').toLowerCase();
-  return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1' || hostname === '0.0.0.0';
-}
-
-function shouldUsePeerJs() {
-  return typeof Peer !== 'undefined' && !isLocalTestingEnvironment();
-}
-
-function postTransportMessage(roomCode, broadcastChannel, payload) {
-  const fullPayload = {
-    ...payload,
-    roomCode: (roomCode || '').toUpperCase(),
-    ts: Date.now(),
-  };
-
-  if (broadcastChannel) {
-    broadcastChannel.postMessage(fullPayload);
-  }
-
-  try {
-    if (typeof window !== 'undefined' && window.localStorage) {
-      window.localStorage.setItem(getTransportStorageKey(roomCode), JSON.stringify(fullPayload));
-    }
-  } catch {
-    // Ignore localStorage failures in private browsing or blocked contexts.
-  }
-}
-
-// --- ICE Server Configuration ---
-// Use public STUN servers for direct peer discovery. TURN is omitted here
-// because it can introduce unnecessary failure points during local tests.
-const ICE_SERVERS = [
-  { urls: 'stun:stun.l.google.com:19302' },
-  { urls: 'stun:stun1.l.google.com:19302' },
-];
 
 // --- Message Types ---
 export const MSG = {
@@ -89,9 +49,6 @@ let _seq = 0;
 
 /**
  * Create a message envelope.
- * @param {string} type - Message type constant
- * @param {*} payload - Message data
- * @returns {{ type: string, payload: *, seq: number, ts: number }}
  */
 function createMessage(type, payload = null) {
   return {
@@ -103,8 +60,8 @@ function createMessage(type, payload = null) {
 }
 
 // --- Heartbeat Constants ---
-const HEARTBEAT_INTERVAL = 5000; // 5 seconds
-const HEARTBEAT_TIMEOUT = HEARTBEAT_INTERVAL * 3; // 3 missed = disconnected
+const HEARTBEAT_INTERVAL = 5000;
+const HEARTBEAT_TIMEOUT = HEARTBEAT_INTERVAL * 3;
 
 /**
  * Create the Host networking layer.
@@ -114,12 +71,13 @@ const HEARTBEAT_TIMEOUT = HEARTBEAT_INTERVAL * 3; // 3 missed = disconnected
  *
  * @param {string} roomCode
  * @param {object} callbacks
- * @param {function} callbacks.onLog - (message: string, level: string) => void
- * @param {function} callbacks.onPlayerJoin - (playerInfo: object) => void
- * @param {function} callbacks.onPlayerDisconnect - (playerId: string) => void
- * @param {function} callbacks.onMessage - (playerId: string, message: object) => void
- * @param {function} callbacks.onReady - () => void
- * @param {function} callbacks.onError - (error: Error) => void
+ * @param {function} callbacks.onLog
+ * @param {function} callbacks.onPlayerJoin
+ * @param {function} callbacks.onPlayerRejoin
+ * @param {function} callbacks.onPlayerDisconnect
+ * @param {function} callbacks.onMessage
+ * @param {function} callbacks.onReady
+ * @param {function} callbacks.onError
  * @returns {object} Host API
  */
 export function createHost(roomCode, callbacks) {
@@ -128,162 +86,66 @@ export function createHost(roomCode, callbacks) {
   let peer = null;
   let heartbeatTimer = null;
   let destroyed = false;
-  let opened = false;
-  let broadcastChannel = null;
-  let transport = 'peerjs';
-  let storageListener = null;
 
   const log = (msg, level = 'info') => {
     callbacks.onLog?.(`[HOST] ${msg}`, level);
   };
 
-  function createConnectionStub(peerId, playerInfo) {
-    return {
-      peer: peerId,
-      open: true,
-      send: (msg) => {
-        postTransportMessage(roomCode, broadcastChannel, {
-          from: hostPeerId,
-          to: peerId,
-          message: msg,
-        });
-      },
-      close: () => {
-        postTransportMessage(roomCode, broadcastChannel, {
-          from: hostPeerId,
-          to: peerId,
-          message: createMessage(MSG.PLAYER_DISCONNECTED, {
-            playerId: playerInfo?.playerId,
-            displayName: playerInfo?.displayName,
-          }),
-        });
-      },
-    };
-  }
-
-  function handleTransportMessage(event) {
-    let data = null;
-
-    if (event?.data) {
-      data = event.data;
-    } else if (event?.key) {
-      if (event.key !== getTransportStorageKey(roomCode)) return;
-      try {
-        data = JSON.parse(event.newValue || 'null');
-      } catch {
-        return;
-      }
-    }
-
-    if (!data) return;
-    if (data.roomCode?.toUpperCase() !== roomCode.toUpperCase()) return;
-    if (data.from === hostPeerId) return;
-    if (!data.message) return;
-
-    const msg = typeof data.message === 'string' ? JSON.parse(data.message) : data.message;
-    const senderId = data.from || data.senderId || data.to;
-
-    if (data.to && data.to !== 'host' && data.to !== hostPeerId) return;
-
-    handlePlayerMessage({
-      peer: senderId,
-      open: true,
-      send: (response) => {
-        postTransportMessage(roomCode, broadcastChannel, {
-          from: hostPeerId,
-          to: senderId,
-          message: response,
-        });
-      },
-      close: () => {},
-    }, msg);
-  }
-
-  function activateBroadcastTransport(reason) {
-    if (transport === 'broadcast' || !broadcastChannel) return;
-    transport = 'broadcast';
-    log(`Using local broadcast transport (${reason})`, 'warn');
-    callbacks.onReady?.();
-    startHeartbeat();
-  }
-
-  // Try PeerJS first; fall back to broadcast transport for same-origin testing.
   log(`Creating peer with ID: ${hostPeerId}`);
 
-  if (typeof BroadcastChannel !== 'undefined') {
-    broadcastChannel = new BroadcastChannel(`mafia-${roomCode.toLowerCase()}`);
-    broadcastChannel.addEventListener('message', handleTransportMessage);
-    activateBroadcastTransport('local broadcast available');
-  }
+  peer = new Peer(hostPeerId, getPeerOptions());
 
-  if (typeof window !== 'undefined' && window.addEventListener) {
-    storageListener = (event) => handleTransportMessage(event);
-    window.addEventListener('storage', storageListener);
-  }
+  peer.on('open', (id) => {
+    log(`Peer broker connected. ID: ${id}`, 'success');
+    callbacks.onReady?.();
+    startHeartbeat();
+  });
 
-  if (shouldUsePeerJs()) {
-    peer = new Peer(hostPeerId, getPeerOptions());
+  peer.on('error', (err) => {
+    if (destroyed) return;
+    log(`Peer error: ${err.type} — ${err.message}`, 'error');
+    callbacks.onError?.(err);
+  });
 
-    peer.on('open', (id) => {
-      if (opened) return;
-      opened = true;
-      log(`Peer broker connected. ID: ${id}`, 'success');
-      callbacks.onReady?.();
-      startHeartbeat();
+  peer.on('disconnected', () => {
+    if (destroyed) return;
+    log('Disconnected from signaling server. Attempting reconnect...', 'warn');
+    peer.reconnect();
+  });
+
+  peer.on('connection', (conn) => {
+    if (destroyed) return;
+    log(`Incoming connection from peer: ${conn.peer}`, 'info');
+
+    conn.on('open', () => {
+      log(`Data channel open with: ${conn.peer}`, 'success');
     });
 
-    peer.on('error', (err) => {
-      if (destroyed) return;
-      if (err.type === 'network' || err.type === 'peer-unavailable') {
-        log(`PeerJS unavailable, switching to broadcast transport: ${err.message}`, 'warn');
-        activateBroadcastTransport(err.message);
-        return;
-      }
-      log(`Peer error: ${err.type} — ${err.message}`, 'error');
-      callbacks.onError?.(err);
+    conn.on('data', (data) => {
+      handlePlayerMessage(conn, data);
     });
 
-    peer.on('disconnected', () => {
-      if (destroyed) return;
-      log('Disconnected from signaling server. Attempting reconnect...', 'warn');
-      if (!destroyed) {
-        peer.reconnect();
-      }
+    conn.on('close', () => {
+      handlePlayerDisconnect(conn.peer);
     });
 
-    peer.on('connection', (conn) => {
-      if (destroyed) return;
-      log(`Incoming connection from peer: ${conn.peer}`, 'info');
-
-      conn.on('open', () => {
-        log(`Data channel open with: ${conn.peer}`, 'success');
-      });
-
-      conn.on('data', (data) => {
-        handlePlayerMessage(conn, data);
-      });
-
-      conn.on('close', () => {
-        handlePlayerDisconnect(conn.peer);
-      });
-
-      conn.on('error', (err) => {
-        log(`Connection error with ${conn.peer}: ${err}`, 'error');
-      });
+    conn.on('error', (err) => {
+      log(`Connection error with ${conn.peer}: ${err}`, 'error');
     });
-  } else {
-    log('PeerJS disabled for local testing; using broadcast transport.', 'warn');
-    activateBroadcastTransport('local testing environment');
-  }
+  });
+
+  // --- Message Handling ---
 
   function handlePlayerMessage(conn, data) {
     const msg = typeof data === 'string' ? JSON.parse(data) : data;
 
     switch (msg.type) {
       case MSG.JOIN: {
+        // Let app.js validate (e.g., block mid-game joins)
         const canJoin = callbacks.onPlayerJoin?.({
           playerId: msg.payload.playerId,
           displayName: msg.payload.displayName,
+          peerId: conn.peer,
           connected: true,
         }) !== false;
 
@@ -303,19 +165,18 @@ export function createHost(roomCode, callbacks) {
           joinedAt: Date.now(),
         };
 
-        const stub = createConnectionStub(conn.peer, playerInfo);
+        // Store the REAL PeerJS connection
         connections.set(conn.peer, {
-          conn: stub,
+          conn,
           playerInfo,
           lastHeartbeat: Date.now(),
         });
 
         log(`Player joined: ${playerInfo.displayName} (${playerInfo.playerId})`, 'success');
 
-        const playerList = getPlayerList();
         conn.send(createMessage(MSG.JOIN_ACK, {
           success: true,
-          players: playerList,
+          players: getPlayerList(),
         }));
 
         broadcastExcept(conn.peer, createMessage(MSG.PLAYER_JOINED, {
@@ -344,9 +205,8 @@ export function createHost(roomCode, callbacks) {
           existingInfo.peerId = conn.peer;
           existingInfo.connected = true;
 
-          const stub = createConnectionStub(conn.peer, existingInfo);
           connections.set(conn.peer, {
-            conn: stub,
+            conn,
             playerInfo: existingInfo,
             lastHeartbeat: Date.now(),
           });
@@ -390,6 +250,14 @@ export function createHost(roomCode, callbacks) {
       }
 
       case MSG.NIGHT_ACTION: {
+        const entry = connections.get(conn.peer);
+        if (entry) {
+          callbacks.onMessage?.(entry.playerInfo.playerId, msg);
+        }
+        break;
+      }
+
+      case MSG.VOTE_ACTION: {
         const entry = connections.get(conn.peer);
         if (entry) {
           callbacks.onMessage?.(entry.playerInfo.playerId, msg);
@@ -470,6 +338,7 @@ export function createHost(roomCode, callbacks) {
     }, HEARTBEAT_INTERVAL);
   }
 
+  // --- Public Host API ---
   return {
     get peerId() { return hostPeerId; },
     get playerCount() { return connections.size; },
@@ -499,8 +368,6 @@ export function createHost(roomCode, callbacks) {
       }
       connections.clear();
       try { peer?.destroy(); } catch {}
-      try { broadcastChannel?.close(); } catch {}
-      try { if (storageListener && typeof window !== 'undefined') window.removeEventListener('storage', storageListener); } catch {}
       log('Host destroyed', 'info');
     },
   };
@@ -509,20 +376,13 @@ export function createHost(roomCode, callbacks) {
 /**
  * Create the Player networking layer.
  *
- * The player creates a PeerJS peer (random ID) and connects
+ * The player creates a PeerJS peer and connects
  * to the host's deterministic peer ID.
  *
  * @param {string} roomCode
  * @param {string} playerId
  * @param {string} displayName
  * @param {object} callbacks
- * @param {function} callbacks.onLog - (message: string, level: string) => void
- * @param {function} callbacks.onConnected - (playerList: array) => void
- * @param {function} callbacks.onDisconnected - () => void
- * @param {function} callbacks.onMessage - (message: object) => void
- * @param {function} callbacks.onPlayerJoined - (playerInfo: object) => void
- * @param {function} callbacks.onPlayerDisconnected - (playerInfo: object) => void
- * @param {function} callbacks.onError - (error: Error) => void
  * @param {boolean} isReconnect
  * @returns {object} Player API
  */
@@ -531,158 +391,64 @@ export function joinAsPlayer(roomCode, playerId, displayName, callbacks, isRecon
   let peer = null;
   let conn = null;
   let destroyed = false;
-  let opened = false;
-  let broadcastChannel = null;
-  let transport = 'peerjs';
-  let storageListener = null;
 
   const log = (msg, level = 'info') => {
     callbacks.onLog?.(`[PLAYER] ${msg}`, level);
   };
 
-  function sendToHost(msg) {
-    if (transport === 'broadcast') {
-      postTransportMessage(roomCode, broadcastChannel, {
-        from: playerId,
-        to: hostPeerId,
-        message: msg,
-      });
-    } else if (conn?.open) {
-      conn.send(msg);
-    }
-  }
-
-  function activateBroadcastTransport(reason) {
-    if (transport === 'broadcast' || !broadcastChannel) return;
-    transport = 'broadcast';
-    log(`Using local broadcast transport (${reason})`, 'warn');
-    conn = {
-      open: true,
-      send: (msg) => {
-        if (broadcastChannel) {
-          broadcastChannel.postMessage({
-            roomCode,
-            from: playerId,
-            to: hostPeerId,
-            message: msg,
-          });
-        }
-      },
-      close: () => {
-        conn = null;
-      },
-    };
-    sendJoinMessage();
-  }
-
-  function sendJoinMessage() {
-    const msgType = isReconnect ? MSG.REJOIN : MSG.JOIN;
-    sendToHost(createMessage(msgType, {
-      playerId,
-      displayName,
-    }));
-  }
-
-  function handleTransportMessage(event) {
-    let data = null;
-
-    if (event?.data) {
-      data = event.data;
-    } else if (event?.key) {
-      if (event.key !== getTransportStorageKey(roomCode)) return;
-      try {
-        data = JSON.parse(event.newValue || 'null');
-      } catch {
-        return;
-      }
-    }
-
-    if (!data) return;
-    if (data.roomCode?.toUpperCase() !== roomCode.toUpperCase()) return;
-    if (data.to && data.to !== hostPeerId && data.to !== playerId) return;
-    if (!data.message) return;
-
-    const msg = typeof data.message === 'string' ? JSON.parse(data.message) : data.message;
-    if (!msg || !msg.type) return;
-
-    handleHostMessage(msg);
-  }
-
   log(`Creating peer and connecting to host: ${hostPeerId}`);
 
-  if (typeof BroadcastChannel !== 'undefined') {
-    broadcastChannel = new BroadcastChannel(`mafia-${roomCode.toLowerCase()}`);
-    broadcastChannel.addEventListener('message', handleTransportMessage);
-    activateBroadcastTransport('local broadcast available');
-  }
+  peer = new Peer(`${playerId}-p`, getPeerOptions());
 
-  if (typeof window !== 'undefined' && window.addEventListener) {
-    storageListener = (event) => handleTransportMessage(event);
-    window.addEventListener('storage', storageListener);
-  }
+  peer.on('open', (id) => {
+    log(`Peer broker connected. My ID: ${id}`, 'success');
+    log(`Connecting to host: ${hostPeerId}...`);
 
-  if (shouldUsePeerJs()) {
-    peer = new Peer(undefined, getPeerOptions());
-
-    peer.on('open', (id) => {
-      if (opened) return;
-      opened = true;
-      log(`Peer broker connected. My ID: ${id}`, 'success');
-      log(`Connecting to host: ${hostPeerId}...`);
-
-      conn = peer.connect(hostPeerId, {
-        reliable: true,
-      });
-
-      conn.on('open', () => {
-        log('Data channel open with host!', 'success');
-        sendJoinMessage();
-      });
-
-      conn.on('iceStateChanged', (state) => {
-        log(`ICE state for host connection: ${state}`, 'info');
-      });
-
-      conn.on('data', (data) => {
-        handleHostMessage(data);
-      });
-
-      conn.on('close', () => {
-        log('Connection to host closed', 'warn');
-        callbacks.onDisconnected?.();
-      });
-
-      conn.on('error', (err) => {
-        log(`Connection error: ${err}`, 'error');
-        callbacks.onError?.(err);
-      });
+    conn = peer.connect(hostPeerId, {
+      reliable: true,
     });
 
-    peer.on('error', (err) => {
-      log(`Peer error: ${err.type} — ${err.message}`, 'error');
+    conn.on('open', () => {
+      log('Data channel open with host!', 'success');
 
-      if (err.type === 'peer-unavailable') {
-        log('Host not found. Room may not exist or host may be offline.', 'error');
-      }
+      // Send JOIN or REJOIN
+      const msgType = isReconnect ? MSG.REJOIN : MSG.JOIN;
+      conn.send(createMessage(msgType, {
+        playerId,
+        displayName,
+      }));
+    });
 
-      if (transport !== 'broadcast') {
-        activateBroadcastTransport(err.message);
-      }
+    conn.on('data', (data) => {
+      handleHostMessage(data);
+    });
 
+    conn.on('close', () => {
+      log('Connection to host closed', 'warn');
+      callbacks.onDisconnected?.();
+    });
+
+    conn.on('error', (err) => {
+      log(`Connection error: ${err}`, 'error');
       callbacks.onError?.(err);
     });
+  });
 
-    peer.on('disconnected', () => {
-      if (destroyed) return;
-      log('Disconnected from signaling server. Attempting reconnect...', 'warn');
-      if (!destroyed) {
-        peer.reconnect();
-      }
-    });
-  } else {
-    log('PeerJS disabled for local testing; using broadcast transport.', 'warn');
-    activateBroadcastTransport('local testing environment');
-  }
+  peer.on('error', (err) => {
+    log(`Peer error: ${err.type} — ${err.message}`, 'error');
+
+    if (err.type === 'peer-unavailable') {
+      log('Host not found. Room may not exist or host may be offline.', 'error');
+    }
+
+    callbacks.onError?.(err);
+  });
+
+  peer.on('disconnected', () => {
+    if (destroyed) return;
+    log('Disconnected from signaling server. Attempting reconnect...', 'warn');
+    peer.reconnect();
+  });
 
   function handleHostMessage(data) {
     const msg = typeof data === 'string' ? JSON.parse(data) : data;
@@ -717,7 +483,6 @@ export function joinAsPlayer(roomCode, playerId, displayName, callbacks, isRecon
         break;
 
       case MSG.HEARTBEAT:
-        // Respond to heartbeat
         if (conn?.open) {
           conn.send(createMessage(MSG.HEARTBEAT_ACK));
         }
@@ -758,9 +523,7 @@ export function joinAsPlayer(roomCode, playerId, displayName, callbacks, isRecon
     destroy() {
       destroyed = true;
       try { if (conn) conn.close(); } catch {}
-      try { peer.destroy(); } catch {}
-      try { broadcastChannel?.close(); } catch {}
-      try { if (storageListener && typeof window !== 'undefined') window.removeEventListener('storage', storageListener); } catch {}
+      try { peer?.destroy(); } catch {}
       log('Player destroyed', 'info');
     },
   };

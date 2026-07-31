@@ -12,6 +12,9 @@
   <!-- Styles -->
   <link rel="stylesheet" href="css/style.css">
 
+  <!-- PeerJS Library (WebRTC abstraction) -->
+  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+
 </head>
 <body>
   <!-- Toast Container -->
@@ -79,6 +82,13 @@
         </div>
         <button id="btn-join" class="btn btn--primary btn--full">
           🚀 Join Game
+        </button>
+      </div>
+
+      <!-- How to play link -->
+      <div class="text-center" style="margin-top: var(--space-xl);">
+        <button id="btn-show-guide" class="btn btn--ghost" style="color: var(--color-text-muted);">
+          📖 How to Play
         </button>
       </div>
     </section>
@@ -426,9 +436,92 @@
       </div>
     </section>
 
+    <!-- ============================================================
+         SCREEN: GAME OVER (Phase 8)
+         ============================================================ -->
+    <section id="screen-game-over" class="screen" style="display: none;">
+      <div class="night-header text-center mb-xl">
+        <h2 id="game-over-title">Game Over!</h2>
+        <p id="game-over-subtitle" class="help-text mt-xs">The Village won!</p>
+      </div>
+
+      <div class="card mb-lg">
+        <h3 class="card__title">Player Roles</h3>
+        <ul id="game-over-players" class="player-list">
+          <!-- Injected via JS -->
+        </ul>
+      </div>
+
+      <button id="btn-game-over-back" class="btn btn--primary btn--full">
+        Return to Lobby
+      </button>
+    </section>
+
+    <!-- ============================================================
+         SCREEN: HOW TO PLAY (Guide)
+         ============================================================ -->
+    <section id="screen-guide" class="screen" style="display: none;">
+      <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: var(--space-xl);">
+        <h2 style="font-size: var(--font-size-xl); font-weight: 700;">📖 How to Play</h2>
+        <button id="btn-guide-back" class="btn btn--ghost" style="font-size: var(--font-size-xl);">✕</button>
+      </div>
+
+      <div class="card mb-md">
+        <h3 class="card__title">The Goal</h3>
+        <p style="font-size: var(--font-size-sm); color: var(--color-text-secondary); line-height: 1.6;">
+          Mafia is a social deduction game. The <strong>Mafia</strong> win by eliminating the village until they hold the majority. The <strong>Village</strong> wins by finding and voting out all Mafia members.
+        </p>
+      </div>
+
+      <div class="card mb-md">
+        <h3 class="card__title">Phases</h3>
+        <ul style="font-size: var(--font-size-sm); color: var(--color-text-secondary); line-height: 1.6; padding-left: var(--space-md);">
+          <li style="margin-bottom: var(--space-xs);"><strong>Night:</strong> The Mafia secretly pick someone to eliminate. The Doctor can save someone, and the Investigator can inspect a player.</li>
+          <li style="margin-bottom: var(--space-xs);"><strong>Day:</strong> Everyone discusses who they think the Mafia is.</li>
+          <li><strong>Voting:</strong> Players vote to eliminate a suspect. The player with the most votes is removed from the game.</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <h3 class="card__title">Roles</h3>
+        
+        <div style="margin-bottom: var(--space-md);">
+          <div style="display: flex; align-items: center; gap: var(--space-sm); margin-bottom: var(--space-xs);">
+            <span style="font-size: var(--font-size-lg);">🤵</span>
+            <strong style="color: var(--color-mafia);">Mafia</strong>
+          </div>
+          <p style="font-size: var(--font-size-xs); color: var(--color-text-muted);">Coordinate with other Mafia to eliminate villagers at night. Blend in during the day.</p>
+        </div>
+
+        <div style="margin-bottom: var(--space-md);">
+          <div style="display: flex; align-items: center; gap: var(--space-sm); margin-bottom: var(--space-xs);">
+            <span style="font-size: var(--font-size-lg);">👨‍⚕️</span>
+            <strong style="color: var(--color-village);">Doctor</strong>
+          </div>
+          <p style="font-size: var(--font-size-xs); color: var(--color-text-muted);">Choose one person each night to protect from the Mafia's attack.</p>
+        </div>
+
+        <div style="margin-bottom: var(--space-md);">
+          <div style="display: flex; align-items: center; gap: var(--space-sm); margin-bottom: var(--space-xs);">
+            <span style="font-size: var(--font-size-lg);">🕵️</span>
+            <strong style="color: var(--color-village);">Investigator</strong>
+          </div>
+          <p style="font-size: var(--font-size-xs); color: var(--color-text-muted);">Investigate one person each night to learn if they are Mafia or Village.</p>
+        </div>
+
+        <div>
+          <div style="display: flex; align-items: center; gap: var(--space-sm); margin-bottom: var(--space-xs);">
+            <span style="font-size: var(--font-size-lg);">🌾</span>
+            <strong style="color: var(--color-village);">Villager</strong>
+          </div>
+          <p style="font-size: var(--font-size-xs); color: var(--color-text-muted);">Use deduction and discussion during the day to root out the Mafia.</p>
+        </div>
+      </div>
+    </section>
+
   </div>
 
   <!-- App Script (ES module) -->
-  <script type="module" src="js/app.js"></script>
+  <script type="module" src="js/app.js?v=2"></script>
 </body>
 </html>

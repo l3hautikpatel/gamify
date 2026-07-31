@@ -40,7 +40,10 @@ export function buildShareableLink(roomCode) {
  * Used to identify players across reconnections — not the display name.
  */
 export function generatePlayerId() {
-  return 'p_' + crypto.randomUUID().slice(0, 8);
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+    return 'p_' + crypto.randomUUID().slice(0, 8);
+  }
+  return 'p_' + Math.random().toString(36).substring(2, 10);
 }
 
 /**
