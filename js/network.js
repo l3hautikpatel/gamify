@@ -342,8 +342,8 @@ export function createHost(roomCode, callbacks) {
   return {
     get peerId() { return hostPeerId; },
     get playerCount() { return connections.size; },
-
     getPlayerList,
+    broadcast,
 
     sendToPlayer(peerId, msg) {
       const entry = connections.get(peerId);

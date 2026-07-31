@@ -802,6 +802,8 @@ function handleStartGame() {
   // Automatically advance to Night phase after a short delay, or let host click next
   hostPhaseTitle.textContent = 'Phase: ROLE REVEAL';
   btnNextPhase.textContent = 'Start Night Phase';
+  
+  broadcastStateUpdate(); // Explicitly push new phase to players
   persistHostState();
 }
 
@@ -1057,10 +1059,15 @@ function broadcastStateUpdate() {
     payload: statePayload
   };
 
-  // Broadcast to all connected players
-  players.filter(p => p.connected).forEach(p => {
-    hostAPI.sendToPlayer(p.peerId, msg);
-  });
+  // Broadcast to all connected players directly via network layer
+  if (hostAPI.broadcast) {
+    hostAPI.broadcast(msg);
+  } else {
+    // Fallback if not updated
+    players.filter(p => p.connected).forEach(p => {
+      hostAPI.sendToPlayer(p.peerId, msg);
+    });
+  }
 }
 
 // ---- Render Player's view of Player List ----
