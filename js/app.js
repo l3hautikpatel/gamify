@@ -24,8 +24,8 @@ import {
   isLocalHost,
 } from './utils.js?v=2';
 
-import { createHost, joinAsPlayer, MSG } from './network.js?v=4';
-import { ROLES } from './roles.js?v=2';
+import { createHost, joinAsPlayer, MSG } from './network.js?v=6';
+import { ROLES } from './roles.js?v=3';
 
 // ---- State ----
 let currentScreen = 'home';
@@ -82,6 +82,7 @@ const joinBtn = document.getElementById('btn-join');
 const createBtn = document.getElementById('btn-create');
 const btnShowGuide = document.getElementById('btn-show-guide');
 const btnGuideBack = document.getElementById('btn-guide-back');
+const btnHardReset = document.getElementById('btn-hard-reset');
 
 // Game Over elements
 const gameOverTitle = document.getElementById('game-over-title');
@@ -275,6 +276,16 @@ function init() {
   btnGuideBack.addEventListener('click', () => {
     showScreen('home');
   });
+  if (btnHardReset) {
+    btnHardReset.addEventListener('click', () => {
+      if (confirm('Are you sure you want to completely reset the app? This will wipe all saved sessions.')) {
+        localStorage.clear();
+        sessionStorage.clear();
+        window.location.search = '';
+        window.location.reload();
+      }
+    });
+  }
   btnGameOverBack.addEventListener('click', () => {
     if (isHost) {
       // Host: go back to host screen (the "Play Again" button already handles the state reset)

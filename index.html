@@ -85,8 +85,8 @@
         </button>
       </div>
 
-      <!-- How to play link -->
-      <div class="text-center" style="margin-top: var(--space-xl);">
+      <!-- Footer Links -->
+      <div class="text-center" style="margin-top: var(--space-xl); display: flex; justify-content: center; gap: var(--space-md);">
         <button id="btn-show-guide" class="btn btn--ghost" style="color: var(--color-text-muted);">
           📖 How to Play
         </button>
@@ -521,7 +521,32 @@
 
   </div>
 
+  <!-- Global Floating Hard Reset Button -->
+  <button id="btn-hard-reset" title="Hard Reset App" style="
+    position: fixed;
+    bottom: var(--space-md);
+    right: var(--space-md);
+    background: rgba(0, 0, 0, 0.6);
+    color: var(--color-danger);
+    border: 1px solid var(--glass-border);
+    border-radius: 50%;
+    width: 40px;
+    height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    z-index: 10000;
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+    transition: all 0.2s ease;
+    opacity: 0.6;
+    font-size: 1.2rem;
+  " onmouseover="this.style.opacity='1'; this.style.transform='scale(1.1)';" onmouseout="this.style.opacity='0.6'; this.style.transform='scale(1)';">
+    ⚠️
+  </button>
+
   <!-- App Script (ES module) -->
-  <script type="module" src="js/app.js?v=5"></script>
+  <script type="module" src="js/app.js?v=7"></script>
 </body>
 </html>
