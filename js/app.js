@@ -881,8 +881,12 @@ function resolveNightActions() {
     if (p) p.alive = false;
   }
 
+  // Track if doctor's save was successful
+  const doctorSaveSuccessful = (killedId && killedId === savedId);
+
   gameState.lastNightResult = {
     victimId: finalVictim,
+    doctorSavedId: doctorSaveSuccessful ? savedId : null,
     investigateResult: investigateResult ? { targetId: investigateTarget, result: investigateResult } : null,
   };
 
@@ -1311,7 +1315,11 @@ function handleStateUpdate(payload) {
     
     // Process night result
     if (lastNightResult) {
-      const { victimId, investigateResult } = lastNightResult;
+      const { victimId, doctorSavedId, investigateResult } = lastNightResult;
+      
+      // Build result messages for the persistent modal (for investigator/doctor)
+      let nightResultLines = [];
+
       if (victimId === playerId) {
         showToast('You were eliminated in the night...', 'error');
         playerMsgInput.disabled = true;
@@ -1323,9 +1331,36 @@ function handleStateUpdate(payload) {
         showToast('The sun rises... nobody was eliminated.', 'success');
       }
 
+      // Investigator result — show in persistent modal
       if (session.lastKnownRole === 'investigator' && investigateResult && investigateResult.targetId) {
-        const resStr = investigateResult.result === 'mafia' ? 'MAFIA' : 'VILLAGE';
-        showToast(`Investigation result: Player is ${resStr}`, investigateResult.result === 'mafia' ? 'error' : 'success');
+        const targetName = alivePlayers.find(p => p.playerId === investigateResult.targetId)?.displayName || 'Unknown';
+        const isMafia = investigateResult.result === 'mafia';
+        nightResultLines.push({
+          icon: '🕵️',
+          title: 'Investigation Result',
+          text: `<strong>${escapeHtml(targetName)}</strong> is aligned with the <strong style="color:${isMafia ? 'var(--color-mafia)' : 'var(--color-village)'}">${isMafia ? 'MAFIA' : 'VILLAGE'}</strong>`,
+        });
+      }
+
+      // Doctor result — show in persistent modal
+      if (session.lastKnownRole === 'doctor' && doctorSavedId) {
+        const savedName = alivePlayers.find(p => p.playerId === doctorSavedId)?.displayName || 'Someone';
+        nightResultLines.push({
+          icon: '🩺',
+          title: 'Protection Successful!',
+          text: `You saved <strong>${escapeHtml(savedName)}</strong> from the Mafia's attack!`,
+        });
+      } else if (session.lastKnownRole === 'doctor' && !doctorSavedId) {
+        nightResultLines.push({
+          icon: '🩺',
+          title: 'Protection Report',
+          text: 'Your patient was not targeted by the Mafia tonight.',
+        });
+      }
+
+      // Show persistent modal if there are results for this player
+      if (nightResultLines.length > 0) {
+        showNightResultModal(nightResultLines);
       }
     }
   } else if (phase === 'VOTING') {
@@ -1534,6 +1569,86 @@ function renderVotingUI(alivePlayers, myRole) {
       }
     });
   }
+}
+
+// ---- Persistent Night Result Modal ----
+// Shows investigation / doctor results that stay on screen until dismissed
+function showNightResultModal(resultLines) {
+  // Remove any existing modal
+  const existing = document.getElementById('night-result-modal');
+  if (existing) existing.remove();
+
+  const resultsHtml = resultLines.map(line => `
+    <div style="
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: var(--radius-md);
+      padding: var(--space-lg);
+      margin-bottom: var(--space-md);
+      text-align: center;
+    ">
+      <div style="font-size: 2.5rem; margin-bottom: var(--space-sm);">${line.icon}</div>
+      <h3 style="font-size: var(--font-size-lg); margin-bottom: var(--space-sm); font-weight: 700;">${escapeHtml(line.title)}</h3>
+      <p style="font-size: var(--font-size-base); line-height: 1.5; color: var(--color-text-primary);">${line.text}</p>
+    </div>
+  `).join('');
+
+  const modal = document.createElement('div');
+  modal.id = 'night-result-modal';
+  modal.style.cssText = `
+    position: fixed;
+    inset: 0;
+    z-index: 9999;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.85);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    padding: var(--space-lg);
+    animation: fadeSlideIn 0.3s ease both;
+  `;
+
+  modal.innerHTML = `
+    <div style="
+      width: 100%;
+      max-width: 400px;
+      background: var(--color-bg-card);
+      border: 1px solid var(--glass-border);
+      border-radius: var(--radius-lg);
+      padding: var(--space-xl);
+      box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+    ">
+      <h2 style="text-align: center; font-size: var(--font-size-xl); margin-bottom: var(--space-lg);">
+        🌅 Night Report
+      </h2>
+      ${resultsHtml}
+      <button id="btn-dismiss-night-result" style="
+        width: 100%;
+        padding: 14px;
+        border: none;
+        border-radius: var(--radius-md);
+        background: var(--color-accent-gradient);
+        color: #fff;
+        font-family: var(--font-family);
+        font-size: var(--font-size-base);
+        font-weight: 600;
+        cursor: pointer;
+        margin-top: var(--space-md);
+        min-height: 48px;
+      ">
+        ✅ Got it
+      </button>
+    </div>
+  `;
+
+  document.body.appendChild(modal);
+
+  document.getElementById('btn-dismiss-night-result').addEventListener('click', () => {
+    modal.style.opacity = '0';
+    modal.style.transition = 'opacity 0.2s ease';
+    setTimeout(() => modal.remove(), 200);
+  });
 }
 
 // ---- Start ----
