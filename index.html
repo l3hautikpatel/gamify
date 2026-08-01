@@ -440,20 +440,20 @@
          SCREEN: GAME OVER (Phase 8)
          ============================================================ -->
     <section id="screen-game-over" class="screen">
-      <div class="night-header text-center mb-xl">
-        <h2 id="game-over-title">Game Over!</h2>
-        <p id="game-over-subtitle" class="help-text mt-xs">The Village won!</p>
+      <div class="card text-center mb-lg" style="padding: var(--space-2xl); background: linear-gradient(135deg, rgba(139,92,246,0.1), rgba(6,182,212,0.1));">
+        <h2 id="game-over-title" style="font-size: var(--font-size-2xl); margin-bottom: var(--space-sm);">Game Over!</h2>
+        <p id="game-over-subtitle" class="mt-xs" style="font-size: var(--font-size-base); font-weight: 600;">The Village won!</p>
       </div>
 
       <div class="card mb-lg">
-        <h3 class="card__title">Player Roles</h3>
+        <h3 class="card__title">👤 Player Roles Revealed</h3>
         <ul id="game-over-players" class="player-list">
           <!-- Injected via JS -->
         </ul>
       </div>
 
       <button id="btn-game-over-back" class="btn btn--primary btn--full">
-        Return to Lobby
+        🔄 Return to Lobby
       </button>
     </section>
 
@@ -522,6 +522,6 @@
   </div>
 
   <!-- App Script (ES module) -->
-  <script type="module" src="js/app.js?v=2"></script>
+  <script type="module" src="js/app.js?v=4"></script>
 </body>
 </html>

@@ -24,7 +24,7 @@ import {
   isLocalHost,
 } from './utils.js?v=2';
 
-import { createHost, joinAsPlayer, MSG } from './network.js?v=3';
+import { createHost, joinAsPlayer, MSG } from './network.js?v=4';
 import { ROLES } from './roles.js?v=2';
 
 // ---- State ----
@@ -276,15 +276,19 @@ function init() {
     showScreen('home');
   });
   btnGameOverBack.addEventListener('click', () => {
-    showScreen('home'); // or lobby, but returning to home is safer for players
     if (isHost) {
-      hostAPI?.destroy();
+      // Host: go back to host screen (the "Play Again" button already handles the state reset)
+      showScreen('host');
     } else {
-      playerAPI?.destroy();
+      // Player: go back to the player lobby; keep the connection alive
+      // The host will broadcast LOBBY when they click "Play Again"
+      showScreen('player');
+      showToast('Waiting for host to start a new game...', 'info');
+      // Re-enable chat in case it was disabled from death
+      playerMsgInput.disabled = false;
+      playerMsgSend.disabled = false;
+      playerMsgInput.placeholder = 'Type a test message…';
     }
-    clearSession();
-    window.location.search = '';
-    window.location.reload();
   });
 
   // Host events room code uppercase
@@ -974,22 +978,38 @@ function checkWinCondition() {
 function handleGameOver(winner) {
   gameState.phase = 'GAME_OVER';
   gameState.winner = winner;
-  
-  // Show host the game over screen too, so they see the same results
-  hostPhaseTitle.textContent = `Game Over - ${winner} Wins!`;
-  btnNextPhase.textContent = 'Back to Lobby';
+  gameState.nightActions = {};
+  gameState.voteActions = {};
+  gameState.lastNightResult = null;
+  gameState.lastVoteResult = null;
   
   if (hostTimerInterval) clearInterval(hostTimerInterval);
   
+  // Show host the game over with clear winner banner
+  hostPhaseTitle.textContent = winner === 'VILLAGE'
+    ? '🏆 Village Wins!'
+    : '🏆 Mafia Wins!';
+  hostPhaseTimer.textContent = '';
+  btnNextPhase.textContent = '🔄 Play Again (Same Players)';
+  
   btnNextPhase.onclick = () => {
-    // Basic reset
+    // Reset for a new round without disconnecting anyone
     gameState.phase = 'LOBBY';
+    gameState.winner = null;
+    gameState.nightActions = {};
+    gameState.voteActions = {};
+    gameState.lastNightResult = null;
+    gameState.lastVoteResult = null;
+    gameState.phaseEndsAt = 0;
+
     btnNextPhase.onclick = handleNextPhase;
     hostSettingsCard.style.display = 'block';
     startGameContainer.style.display = 'block';
     hostGameControls.style.display = 'none';
     startGameBtn.textContent = '🎲 Start Game';
     startGameBtn.disabled = false;
+    hostPhaseTitle.textContent = 'Phase: LOBBY';
+    hostPhaseTimer.textContent = '00:00';
     
     // Reset player roles/alive status for next game
     players.forEach(p => {
@@ -997,17 +1017,20 @@ function handleGameOver(winner) {
       p.alive = true;
     });
     
+    showScreen('host');
     broadcastStateUpdate();
     persistHostState();
+    showToast('Lobby reset! Start a new game when ready.', 'success');
   };
 
   broadcastStateUpdate();
   persistHostState();
   
-  // Also render game over screen on host's own device if they want to look at it
+  // Also show game over screen on host device
   renderGameOverUI(winner, players);
   showScreen('gameOver');
 }
+
 
 let hostTimerInterval = null;
 function startHostPhaseTimer(endTimeMs, onExpire) {
@@ -1040,6 +1063,7 @@ function broadcastStateUpdate() {
     phase: gameState.phase,
     phaseEndsAt: gameState.phaseEndsAt,
     lastNightResult: gameState.lastNightResult,
+    winner: gameState.winner || null,
     // Provide a list of alive players so clients can build action grids
     alivePlayers: players.filter(p => p.connected && p.alive).map(p => ({
       playerId: p.playerId,
@@ -1266,7 +1290,18 @@ function handleStateUpdate(payload) {
   }
 
   // Handle phase transitions
-  if (phase === 'ROLE_REVEAL') {
+  if (phase === 'LOBBY') {
+    // Host restarted the game — return to lobby
+    showScreen('player');
+    showToast('Host started a new lobby! Waiting for game to begin...', 'info');
+    // Re-enable chat in case it was disabled from death
+    playerMsgInput.disabled = false;
+    playerMsgSend.disabled = false;
+    playerMsgInput.placeholder = 'Type a test message…';
+    // Clear any stale role info
+    session.lastKnownRole = null;
+    saveSession(session);
+  } else if (phase === 'ROLE_REVEAL') {
     showScreen('roleReveal');
   } else if (phase === 'NIGHT') {
     renderNightActionUI(alivePlayers, session.lastKnownRole);
@@ -1299,22 +1334,29 @@ function handleStateUpdate(payload) {
   } else if (phase === 'GAME_OVER') {
     renderGameOverUI(winner, allPlayers);
     showScreen('gameOver');
-    showToast(`Game Over! ${winner} Wins!`, 'success');
+    const winnerLabel = winner === 'VILLAGE' ? '🏆 Village Wins!' : '🏆 Mafia Wins!';
+    showToast(winnerLabel, 'success');
   }
 }
 
 function renderGameOverUI(winner, allPlayersList) {
   if (!allPlayersList) return;
   
-  gameOverTitle.textContent = 'Game Over!';
+  const isVillageWin = winner === 'VILLAGE';
   
-  if (winner === 'VILLAGE') {
-    gameOverSubtitle.textContent = 'The Village has eliminated the Mafia!';
-    gameOverSubtitle.style.color = 'var(--color-village)';
-  } else {
-    gameOverSubtitle.textContent = 'The Mafia has taken over the town!';
-    gameOverSubtitle.style.color = 'var(--color-mafia)';
-  }
+  // Big dramatic winner title
+  gameOverTitle.innerHTML = isVillageWin
+    ? '🏆 Village Wins! 🎉'
+    : '🏆 Mafia Wins! 🔪';
+  gameOverTitle.style.fontSize = 'var(--font-size-2xl)';
+  gameOverTitle.style.color = isVillageWin ? 'var(--color-village)' : 'var(--color-mafia)';
+  
+  gameOverSubtitle.textContent = isVillageWin
+    ? 'The Village has uncovered and eliminated all the Mafia!'
+    : 'The Mafia outnumbered the Village and seized control!';
+  gameOverSubtitle.style.color = isVillageWin ? 'var(--color-village)' : 'var(--color-mafia)';
+  gameOverSubtitle.style.fontWeight = '600';
+  gameOverSubtitle.style.fontSize = 'var(--font-size-base)';
 
   // Sort: alive first, then dead
   const sorted = [...allPlayersList].sort((a, b) => {
@@ -1325,27 +1367,31 @@ function renderGameOverUI(winner, allPlayersList) {
   gameOverPlayers.innerHTML = sorted.map(p => {
     const isDead = !p.alive;
     let roleName = 'Unknown';
+    let roleIcon = '❓';
     let roleColor = 'var(--color-text-muted)';
     
     if (p.role) {
       const def = ROLES[p.role.toUpperCase()];
       if (def) {
-        roleName = `${def.icon} ${def.name}`;
+        roleName = def.name;
+        roleIcon = def.icon;
         roleColor = def.team === 'mafia' ? 'var(--color-mafia)' : 'var(--color-village)';
       }
     }
     
     return `
-      <li class="player-item ${isDead ? 'is-dead' : ''}">
-        <div class="player-item__avatar">${isDead ? '💀' : getInitial(p.displayName)}</div>
+      <li class="player-item ${isDead ? 'is-dead' : ''}" style="padding: var(--space-md); border-bottom: 1px solid rgba(255,255,255,0.05);">
+        <div class="player-item__avatar" style="font-size: var(--font-size-xl);">${isDead ? '💀' : roleIcon}</div>
         <div style="flex: 1;">
-          <span class="player-item__name" style="${isDead ? 'text-decoration: line-through;' : ''}">${escapeHtml(p.displayName)}</span>
-          <div style="font-size: var(--font-size-xs); color: ${roleColor}; margin-top: 2px;">
-            ${roleName}
+          <span class="player-item__name" style="${isDead ? 'text-decoration: line-through; opacity: 0.6;' : 'font-weight: 700;'}">${escapeHtml(p.displayName)}</span>
+          <div style="font-size: var(--font-size-sm); color: ${roleColor}; margin-top: 2px; font-weight: 600;">
+            ${roleIcon} ${roleName}
           </div>
         </div>
         <span class="player-item__status">
-          ${isDead ? '<span style="color:var(--color-text-muted); font-size:var(--font-size-xs);">Eliminated</span>' : '<span style="color:var(--color-success); font-size:var(--font-size-xs);">Survived</span>'}
+          ${isDead 
+            ? '<span style="color:var(--color-text-muted); font-size:var(--font-size-xs); background: rgba(248,113,113,0.15); padding: 2px 8px; border-radius: 9999px;">💀 Eliminated</span>' 
+            : '<span style="color:var(--color-success); font-size:var(--font-size-xs); background: rgba(74,222,128,0.15); padding: 2px 8px; border-radius: 9999px;">✅ Survived</span>'}
         </span>
       </li>
     `;
@@ -1370,8 +1416,8 @@ function renderNightActionUI(alivePlayers, myRole) {
     promptText = 'Select a player to investigate:';
     canAct = true;
   } else {
-    promptText = 'You have no night actions. Wait for morning.';
-    canAct = false;
+    promptText = 'Blend in (select a player randomly to fake an action):';
+    canAct = true;
   }
 
   let html = `<p class="text-center mb-md">${promptText}</p>`;
